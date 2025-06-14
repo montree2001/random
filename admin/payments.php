@@ -260,7 +260,7 @@ $students_with_colors = $stmt->fetchAll();
     <div class="container-fluid">
         <div class="row">
             <!-- Sidebar -->
-            <?php include 'menu.php'; ?>
+          <?php include 'menu.php'; ?>
             
             <!-- Main Content -->
             <div class="col-md-9 p-4">
