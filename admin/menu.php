@@ -16,9 +16,7 @@
                     <a class="nav-link" href="assign_colors.php">
                         <i class="fas fa-users"></i> จัดสีให้นักเรียน
                     </a>
-                    <a class="nav-link" href="random_colors.php">
-                        <i class="fas fa-random"></i> สุ่มสี
-                    </a>
+            
                     <a class="nav-link" href="payments.php">
                         <i class="fas fa-money-bill"></i> บันทึกการจ่ายเงิน
                     </a>
