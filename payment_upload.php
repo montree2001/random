@@ -1,12 +1,12 @@
 <?php
-// payment_upload.php - หน้าอัพโหลดสลิปสำหรับนักเรียน
+// payment_upload.php - หน้าอัพโหลดสลิปสำหรับนักเรียน (ปรับปรุงใหม่)
 require_once 'config/database.php';
 session_start();
 
 $database = new Database();
 $db = $database->getConnection();
 
-// ตรวจสอบการส่งฟอร์ม
+// จัดการการส่งฟอร์ม
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     try {
         $student_code = trim($_POST['student_code']);
@@ -24,7 +24,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             FROM students s
             JOIN student_colors sc ON s.student_id = sc.student_id
             JOIN academic_years ay ON sc.academic_year_id = ay.academic_year_id
-            WHERE s.student_code = ? AND ay.is_current = 1
+            WHERE s.student_code = ? AND ay.is_active = 1 AND s.status = 'กำลังศึกษา'
         ";
         $student_stmt = $db->prepare($student_query);
         $student_stmt->execute([$student_code]);
@@ -90,7 +90,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $notes
         ]);
 
-        $success_message = 'อัพโหลดสลิปเรียบร้อยแล้ว รอการตรวจสอบจากเจ้าหน้าที่';
+        $success_upload = true;
         
     } catch (Exception $e) {
         $error_message = $e->getMessage();
@@ -102,16 +102,42 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 }
 
 // ดึงข้อมูลปีการศึกษาปัจจุบัน
-$current_academic_year_query = "SELECT * FROM academic_years WHERE is_current = 1 LIMIT 1";
+$current_academic_year_query = "SELECT * FROM academic_years WHERE is_active = 1 LIMIT 1";
 $current_academic_year_stmt = $db->prepare($current_academic_year_query);
 $current_academic_year_stmt->execute();
 $current_academic_year = $current_academic_year_stmt->fetch();
 
-// ดึงข้อมูลสีทั้งหมด
-$colors_query = "SELECT * FROM colors WHERE is_active = 1 ORDER BY color_name";
-$colors_stmt = $db->prepare($colors_query);
-$colors_stmt->execute();
-$colors = $colors_stmt->fetchAll();
+// รายการธนาคาร
+$banks = [
+    'ธนาคารกรุงเทพ',
+    'ธนาคารกสิกรไทย',
+    'ธนาคารไทยพาณิชย์',
+    'ธนาคารกรุงไทย',
+    'ธนาคารทหารไทยธนชาต',
+    'ธนาคารกรุงศรีอยุธยา',
+    'ธนาคารเกียรตินาคิน',
+    'ธนาคารซีไอเอ็มบี ไทย',
+    'ธนาคารทิสโก้',
+    'ธนาคารยูโอบี',
+    'ธนาคารแลนด์ แอนด์ เฮ้าส์',
+    'ธนาคารไอซีบีซี (ไทย)',
+    'ธนาคารพัฒนาวิสาหกิจขนาดกลางและขนาดย่อมแห่งประเทศไทย',
+    'ธนาคารเพื่อการเกษตรและสหกรณ์การเกษตร',
+    'ธนาคารออมสิน',
+    'ธนาคารอาคารสงเคราะห์',
+    'ธนาคารอิสลามแห่งประเทศไทย',
+    'ธนาคารเกียรตินาคินภัทร'
+];
+
+// ข้อมูลธนาคารตามสี (ในการใช้งานจริงควรเก็บในฐานข้อมูล)
+$bank_accounts = [
+    'default' => [
+        'bank_name' => 'ธนาคารกรุงไทย',
+        'account_number' => '1234567890',
+        'account_name' => 'กิจกรรมนักเรียน วิทยาลัยการอาชีพปราสาท',
+        'fee_amount' => 150.00
+    ]
+];
 ?>
 
 <!DOCTYPE html>
@@ -119,450 +145,569 @@ $colors = $colors_stmt->fetchAll();
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>อัพโหลดสลิปการชำระเงิน - ระบบจัดการสีและกีฬาสี</title>
+    <title>ส่งหลักฐานการโอนเงินค่าบำรุงสี - วิทยาลัยการอาชีพปราสาท</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
     <style>
-        .upload-area {
-            border: 2px dashed #ddd;
-            border-radius: 10px;
-            padding: 40px;
-            text-align: center;
-            background: #f8f9fa;
-            transition: all 0.3s;
-            cursor: pointer;
-            position: relative;
-            overflow: hidden;
+        body {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            font-family: 'Sarabun', sans-serif;
         }
-        .upload-area:hover {
-            border-color: #007bff;
-            background: #e3f2fd;
-        }
-        .upload-area.dragover {
-            border-color: #007bff;
-            background: #e3f2fd;
-            transform: scale(1.02);
-        }
-        .preview-container {
-            max-width: 300px;
+        
+        .main-container {
+            background: rgba(255, 255, 255, 0.95);
+            backdrop-filter: blur(10px);
+            border-radius: 20px;
+            box-shadow: 0 15px 35px rgba(0,0,0,0.1);
             margin: 20px auto;
+            max-width: 900px;
         }
-        .preview-image {
-            max-width: 100%;
-            max-height: 300px;
-            border-radius: 8px;
-            box-shadow: 0 4px 15px rgba(0,0,0,0.1);
+        
+        .header-section {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border-radius: 20px 20px 0 0;
+            padding: 2rem;
+            text-align: center;
         }
+        
+        .content-section {
+            padding: 2rem;
+        }
+        
+        .bank-info-card {
+            background: linear-gradient(135deg, #f8f9fa 0%, #e9ecef 100%);
+            border-radius: 15px;
+            padding: 1.5rem;
+            margin-bottom: 1.5rem;
+            border-left: 5px solid;
+        }
+        
+        .color-badge {
+            width: 30px;
+            height: 30px;
+            border-radius: 50%;
+            display: inline-block;
+            margin-right: 10px;
+            border: 3px solid #fff;
+            box-shadow: 0 3px 10px rgba(0,0,0,0.3);
+        }
+        
         .form-section {
             background: white;
             border-radius: 15px;
-            box-shadow: 0 5px 25px rgba(0,0,0,0.1);
-            padding: 2rem;
-            margin-bottom: 2rem;
-        }
-        .section-title {
-            color: #495057;
-            border-bottom: 2px solid #e9ecef;
-            padding-bottom: 0.5rem;
-            margin-bottom: 1.5rem;
-        }
-        .color-preview {
-            width: 20px;
-            height: 20px;
-            border-radius: 50%;
-            display: inline-block;
-            margin-right: 8px;
-            border: 2px solid #fff;
-            box-shadow: 0 0 3px rgba(0,0,0,0.3);
-        }
-        .info-card {
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
-            border-radius: 15px;
             padding: 1.5rem;
-            margin-bottom: 2rem;
+            box-shadow: 0 5px 15px rgba(0,0,0,0.1);
         }
-        .btn-primary {
+        
+        .upload-area {
+            border: 2px dashed #667eea;
+            border-radius: 10px;
+            padding: 2rem;
+            text-align: center;
+            background: #f8f9ff;
+            transition: all 0.3s;
+            cursor: pointer;
+        }
+        
+        .upload-area:hover {
+            border-color: #764ba2;
+            background: #f0f2ff;
+        }
+        
+        .upload-area.dragover {
+            border-color: #28a745;
+            background: #f0fff4;
+        }
+        
+        .btn-submit {
             background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
             border: none;
-            border-radius: 25px;
-            padding: 12px 30px;
-            font-weight: 500;
-        }
-        .form-control, .form-select {
             border-radius: 10px;
-            padding: 12px 15px;
-            border: 2px solid #e9ecef;
+            padding: 12px 30px;
+            color: white;
+            font-weight: 600;
             transition: all 0.3s;
         }
-        .form-control:focus, .form-select:focus {
-            border-color: #667eea;
-            box-shadow: 0 0 0 0.2rem rgba(102, 126, 234, 0.25);
+        
+        .btn-submit:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(0,0,0,0.2);
+            color: white;
+        }
+        
+        .slip-preview {
+            max-width: 100%;
+            max-height: 300px;
+            border-radius: 10px;
+            box-shadow: 0 5px 15px rgba(0,0,0,0.1);
+        }
+        
+        .step-indicator {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 2rem;
+        }
+        
+        .step {
+            flex: 1;
+            text-align: center;
+            position: relative;
+        }
+        
+        .step::after {
+            content: '';
+            position: absolute;
+            top: 20px;
+            left: 50%;
+            width: 100%;
+            height: 2px;
+            background: #dee2e6;
+            z-index: 1;
+        }
+        
+        .step:last-child::after {
+            display: none;
+        }
+        
+        .step.active .step-circle {
+            background: #667eea;
+            color: white;
+        }
+        
+        .step.completed .step-circle {
+            background: #28a745;
+            color: white;
+        }
+        
+        .step-circle {
+            width: 40px;
+            height: 40px;
+            border-radius: 50%;
+            background: #dee2e6;
+            color: #6c757d;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin: 0 auto 0.5rem;
+            position: relative;
+            z-index: 2;
         }
     </style>
 </head>
-<body class="bg-light">
-    <!-- Navigation -->
-    <nav class="navbar navbar-expand-lg navbar-dark bg-primary">
-        <div class="container">
-            <a class="navbar-brand" href="index.php">
-                <i class="fas fa-palette me-2"></i>ระบบจัดการสีและกีฬาสี
-            </a>
-            <div class="navbar-nav ms-auto">
-                <a class="nav-link" href="index.php">
-                    <i class="fas fa-home me-1"></i>หน้าแรก
-                </a>
-                <a class="nav-link" href="student_portal.php">
-                    <i class="fas fa-user me-1"></i>พอร์ทัลนักเรียน
-                </a>
+<body>
+    <div class="container">
+        <div class="main-container">
+            <!-- Header -->
+            <div class="header-section">
+                <div class="mb-3">
+                    <i class="fas fa-money-bill-transfer fa-3x"></i>
+                </div>
+                <h1><i class="fas fa-upload me-2"></i>ส่งหลักฐานการโอนเงิน</h1>
+                <p class="mb-0">ค่าบำรุงกิจกรรมกีฬาสี</p>
+                <p class="mt-2 mb-0">วิทยาลัยการอาชีพปราสาท</p>
+                <?php if ($current_academic_year): ?>
+                <p class="mt-2 mb-0">
+                    <i class="fas fa-calendar-alt me-2"></i>
+                    ปีการศึกษา <?php echo $current_academic_year['year']; ?> ภาคเรียนที่ <?php echo $current_academic_year['semester']; ?>
+                </p>
+                <?php endif; ?>
             </div>
-        </div>
-    </nav>
-
-    <div class="container mt-4">
-        <!-- Header -->
-        <div class="row mb-4">
-            <div class="col-12">
-                <div class="d-flex justify-content-between align-items-center">
-                    <div>
-                        <h2><i class="fas fa-receipt me-2"></i>อัพโหลดสลิปการชำระเงิน</h2>
-                        <p class="text-muted">อัพโหลดสลิปการโอนเงินค่าบำรุงสี</p>
+            
+            <div class="content-section">
+                <?php if (isset($success_upload) && $success_upload): ?>
+                <!-- Success Section -->
+                <div id="successSection" class="text-center">
+                    <div class="mb-4">
+                        <i class="fas fa-check-circle fa-5x text-success"></i>
+                    </div>
+                    <h3 class="text-success">ส่งหลักฐานการโอนเงินเรียบร้อยแล้ว!</h3>
+                    <p class="text-muted">
+                        ระบบได้รับหลักฐานการโอนเงินของคุณแล้ว<br>
+                        กรุณารอการตรวจสอบจากเจ้าหน้าที่ภายใน 1-2 วันทำการ
+                    </p>
+                    <div class="mt-4">
+                        <button type="button" class="btn btn-outline-primary me-2" onclick="location.reload()">
+                            <i class="fas fa-plus"></i> ส่งหลักฐานใหม่
+                        </button>
+                        <a href="student_portal.php" class="btn btn-outline-success">
+                            <i class="fas fa-home"></i> กลับหน้าหลัก
+                        </a>
                     </div>
                 </div>
-            </div>
-        </div>
-
-        <!-- Info Card -->
-        <?php if ($current_academic_year): ?>
-        <div class="info-card">
-            <div class="row align-items-center">
-                <div class="col-md-8">
-                    <h5><i class="fas fa-info-circle me-2"></i>ข้อมูลการชำระเงิน</h5>
-                    <p class="mb-2">ปีการศึกษา: <?php echo $current_academic_year['year']; ?> ภาคเรียนที่ <?php echo $current_academic_year['semester']; ?></p>
-                    <p class="mb-0">กรุณาอัพโหลดสลิปการโอนเงินค่าบำรุงสีให้ครบถ้วนและชัดเจน</p>
-                </div>
-                <div class="col-md-4 text-end">
-                    <i class="fas fa-money-bill-wave fa-3x opacity-75"></i>
-                </div>
-            </div>
-        </div>
-        <?php endif; ?>
-
-        <!-- Alert Messages -->
-        <?php if (isset($success_message)): ?>
-        <div class="alert alert-success alert-dismissible fade show" role="alert">
-            <i class="fas fa-check-circle me-2"></i><?php echo $success_message; ?>
-            <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
-        </div>
-        <?php endif; ?>
-
-        <?php if (isset($error_message)): ?>
-        <div class="alert alert-danger alert-dismissible fade show" role="alert">
-            <i class="fas fa-exclamation-circle me-2"></i><?php echo $error_message; ?>
-            <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
-        </div>
-        <?php endif; ?>
-
-        <!-- Upload Form -->
-        <form method="POST" enctype="multipart/form-data" id="uploadForm">
-            <!-- Student Information Section -->
-            <div class="form-section">
-                <h5 class="section-title"><i class="fas fa-user me-2"></i>ข้อมูลนักเรียน</h5>
-                <div class="row">
-                    <div class="col-md-6">
-                        <label for="student_code" class="form-label">รหัสนักเรียน <span class="text-danger">*</span></label>
-                        <input type="text" 
-                               class="form-control" 
-                               id="student_code" 
-                               name="student_code" 
-                               placeholder="กรอกรหัสนักเรียน 11 หลัก"
-                               maxlength="11"
-                               pattern="[0-9]{11}"
-                               required>
-                        <div class="form-text">กรอกรหัสนักเรียน 11 หลัก</div>
-                    </div>
-                    <div class="col-md-6">
-                        <label class="form-label">สีปัจจุบัน</label>
-                        <div id="studentColorInfo" class="p-3 bg-light rounded" style="display: none;">
-                            <div id="colorDisplay"></div>
+                <?php else: ?>
+                
+                <!-- Search Student Section -->
+                <div class="form-section mb-4">
+                    <h4 class="mb-3"><i class="fas fa-search me-2"></i>ค้นหาข้อมูลของคุณ</h4>
+                    <form id="searchForm" class="row g-3">
+                        <div class="col-md-8">
+                            <label class="form-label fw-bold">รหัสนักเรียน</label>
+                            <input type="text" class="form-control form-control-lg" id="studentCode" 
+                                   placeholder="กรอกรหัสนักเรียน 11 หลัก" maxlength="11" required>
                         </div>
-                        <div id="noColorInfo" class="p-3 bg-light rounded text-muted">
-                            กรอกรหัสนักเรียนเพื่อดูข้อมูลสี
+                        <div class="col-md-4 d-flex align-items-end">
+                            <button type="submit" class="btn btn-submit w-100">
+                                <i class="fas fa-search me-2"></i>ค้นหา
+                            </button>
                         </div>
-                    </div>
-                </div>
-            </div>
-
-            <!-- Payment Information Section -->
-            <div class="form-section">
-                <h5 class="section-title"><i class="fas fa-money-bill me-2"></i>ข้อมูลการชำระเงิน</h5>
-                <div class="row">
-                    <div class="col-md-4">
-                        <label for="amount" class="form-label">จำนวนเงิน (บาท) <span class="text-danger">*</span></label>
-                        <input type="number" 
-                               class="form-control" 
-                               id="amount" 
-                               name="amount" 
-                               step="0.01" 
-                               min="0" 
-                               placeholder="0.00"
-                               required>
-                    </div>
-                    <div class="col-md-4">
-                        <label for="transfer_date" class="form-label">วันที่โอนเงิน <span class="text-danger">*</span></label>
-                        <input type="date" 
-                               class="form-control" 
-                               id="transfer_date" 
-                               name="transfer_date" 
-                               max="<?php echo date('Y-m-d'); ?>"
-                               required>
-                    </div>
-                    <div class="col-md-4">
-                        <label for="transfer_time" class="form-label">เวลาที่โอนเงิน</label>
-                        <input type="time" 
-                               class="form-control" 
-                               id="transfer_time" 
-                               name="transfer_time">
-                    </div>
-                </div>
-                
-                <div class="row mt-3">
-                    <div class="col-md-6">
-                        <label for="bank_from" class="form-label">ธนาคารต้นทาง</label>
-                        <input type="text" 
-                               class="form-control" 
-                               id="bank_from" 
-                               name="bank_from" 
-                               placeholder="เช่น ธนาคารกสิกรไทย">
-                    </div>
-                    <div class="col-md-6">
-                        <label for="bank_to" class="form-label">ธนาคารปลายทาง</label>
-                        <input type="text" 
-                               class="form-control" 
-                               id="bank_to" 
-                               name="bank_to" 
-                               placeholder="เช่น ธนาคารไทยพาณิชย์">
-                    </div>
-                </div>
-                
-                <div class="row mt-3">
-                    <div class="col-md-6">
-                        <label for="ref_number" class="form-label">หมายเลขอ้างอิง</label>
-                        <input type="text" 
-                               class="form-control" 
-                               id="ref_number" 
-                               name="ref_number" 
-                               placeholder="หมายเลขอ้างอิงจากสลิป">
-                    </div>
-                    <div class="col-md-6">
-                        <label for="notes" class="form-label">หมายเหตุ</label>
-                        <textarea class="form-control" 
-                                  id="notes" 
-                                  name="notes" 
-                                  rows="2" 
-                                  placeholder="หมายเหตุเพิ่มเติม (ไม่บังคับ)"></textarea>
-                    </div>
-                </div>
-            </div>
-
-            <!-- File Upload Section -->
-            <div class="form-section">
-                <h5 class="section-title"><i class="fas fa-image me-2"></i>อัพโหลดรูปสลิป</h5>
-                
-                <div class="upload-area" id="uploadArea">
-                    <input type="file" 
-                           id="slip_image" 
-                           name="slip_image" 
-                           accept="image/*" 
-                           required 
-                           style="display: none;">
+                    </form>
                     
-                    <div id="uploadPrompt">
-                        <i class="fas fa-cloud-upload-alt fa-3x text-muted mb-3"></i>
-                        <h5>ลากและวางรูปภาพที่นี่</h5>
-                        <p class="text-muted">หรือคลิกเพื่อเลือกไฟล์</p>
-                        <div class="mt-3">
-                            <span class="badge bg-info me-2">JPG</span>
-                            <span class="badge bg-info me-2">JPEG</span>
-                            <span class="badge bg-info">PNG</span>
+                    <?php if (isset($error_message)): ?>
+                    <div class="alert alert-danger mt-3">
+                        <i class="fas fa-exclamation-circle me-2"></i><?php echo $error_message; ?>
+                    </div>
+                    <?php endif; ?>
+                </div>
+                
+                <!-- Student Info Section (Hidden initially) -->
+                <div id="studentInfoSection" class="d-none">
+                    <!-- Step Indicator -->
+                    <div class="step-indicator">
+                        <div class="step completed">
+                            <div class="step-circle">
+                                <i class="fas fa-user"></i>
+                            </div>
+                            <small>ตรวจสอบข้อมูล</small>
                         </div>
-                        <p class="small text-muted mt-2">ขนาดไฟล์สูงสุด 5MB</p>
+                        <div class="step active">
+                            <div class="step-circle">
+                                <i class="fas fa-money-bill"></i>
+                            </div>
+                            <small>โอนเงิน</small>
+                        </div>
+                        <div class="step">
+                            <div class="step-circle">
+                                <i class="fas fa-upload"></i>
+                            </div>
+                            <small>ส่งหลักฐาน</small>
+                        </div>
+                        <div class="step">
+                            <div class="step-circle">
+                                <i class="fas fa-check"></i>
+                            </div>
+                            <small>เสร็จสิ้น</small>
+                        </div>
                     </div>
                     
-                    <div id="imagePreview" style="display: none;">
-                        <div class="preview-container">
-                            <img id="previewImg" class="preview-image" alt="Preview">
-                        </div>
-                        <p class="mt-2 mb-0">คลิกเพื่อเปลี่ยนรูป</p>
+                    <!-- Student Info Card -->
+                    <div class="form-section mb-4">
+                        <h5><i class="fas fa-user me-2 text-primary"></i>ข้อมูลของคุณ</h5>
+                        <div id="studentInfoDisplay"></div>
+                    </div>
+                    
+                    <!-- Bank Info Card -->
+                    <div id="bankInfoCard">
+                        <!-- จะแสดงข้อมูลธนาคารที่นี่ -->
+                    </div>
+                    
+                    <!-- Upload Form -->
+                    <div class="form-section">
+                        <h5><i class="fas fa-upload me-2 text-success"></i>อัพโหลดหลักฐานการโอนเงิน</h5>
+                        <form method="POST" enctype="multipart/form-data" id="uploadForm">
+                            <input type="hidden" id="hiddenStudentCode" name="student_code">
+                            
+                            <div class="row">
+                                <div class="col-md-6">
+                                    <div class="mb-3">
+                                        <label class="form-label">จำนวนเงินที่โอน <span class="text-danger">*</span></label>
+                                        <div class="input-group">
+                                            <input type="number" class="form-control" name="amount" id="amount" 
+                                                   step="0.01" min="0" required readonly>
+                                            <span class="input-group-text">บาท</span>
+                                        </div>
+                                    </div>
+                                    
+                                    <div class="mb-3">
+                                        <label class="form-label">วันที่โอนเงิน <span class="text-danger">*</span></label>
+                                        <input type="date" class="form-control" name="transfer_date" id="transferDate" 
+                                               max="<?php echo date('Y-m-d'); ?>" required>
+                                    </div>
+                                    
+                                    <div class="mb-3">
+                                        <label class="form-label">เวลาที่โอนเงิน</label>
+                                        <input type="time" class="form-control" name="transfer_time" id="transferTime">
+                                    </div>
+                                    
+                                    <div class="mb-3">
+                                        <label class="form-label">ธนาคารต้นทาง</label>
+                                        <select class="form-select" name="bank_from" id="bankFrom">
+                                            <option value="">เลือกธนาคาร</option>
+                                            <?php foreach ($banks as $bank): ?>
+                                            <option value="<?php echo htmlspecialchars($bank); ?>"><?php echo htmlspecialchars($bank); ?></option>
+                                            <?php endforeach; ?>
+                                        </select>
+                                    </div>
+                                    
+                                    <div class="mb-3">
+                                        <label class="form-label">หมายเลขอ้างอิง</label>
+                                        <input type="text" class="form-control" name="ref_number" id="refNumber" 
+                                               placeholder="หมายเลขอ้างอิงจากสลิป">
+                                    </div>
+                                </div>
+                                
+                                <div class="col-md-6">
+                                    <div class="mb-3">
+                                        <label class="form-label">อัพโหลดรูปสลิป <span class="text-danger">*</span></label>
+                                        <div class="upload-area" onclick="document.getElementById('slipImage').click()">
+                                            <div id="uploadPrompt">
+                                                <i class="fas fa-cloud-upload-alt fa-3x text-primary mb-3"></i>
+                                                <p class="mb-2"><strong>คลิกเพื่อเลือกไฟล์</strong></p>
+                                                <p class="text-muted mb-0">หรือลากไฟล์มาวางที่นี่</p>
+                                                <small class="text-muted">รองรับไฟล์: JPG, JPEG, PNG (ขนาดไม่เกิน 5MB)</small>
+                                            </div>
+                                            <div id="imagePreview" class="d-none">
+                                                <img id="previewImg" class="slip-preview" alt="ตัวอย่างสลิป">
+                                                <p class="mt-2 mb-0">
+                                                    <button type="button" class="btn btn-sm btn-outline-danger" onclick="removeImage()">
+                                                        <i class="fas fa-trash"></i> ลบภาพ
+                                                    </button>
+                                                </p>
+                                            </div>
+                                        </div>
+                                        <input type="file" name="slip_image" id="slipImage" 
+                                               accept="image/jpeg,image/jpg,image/png" 
+                                               style="display: none;" required>
+                                    </div>
+                                    
+                                    <div class="mb-3">
+                                        <label class="form-label">หมายเหตุเพิ่มเติม</label>
+                                        <textarea class="form-control" name="notes" id="notes" rows="3" 
+                                                  placeholder="ข้อมูลเพิ่มเติม (ถ้ามี)"></textarea>
+                                    </div>
+                                </div>
+                            </div>
+                            
+                            <div class="text-center mt-4">
+                                <button type="submit" class="btn btn-submit btn-lg">
+                                    <i class="fas fa-paper-plane me-2"></i>ส่งหลักฐานการโอนเงิน
+                                </button>
+                            </div>
+                        </form>
                     </div>
                 </div>
                 
-                <div class="form-text mt-2">
-                    <i class="fas fa-info-circle me-1"></i>
-                    กรุณาถ่ายรูปสลิปให้ชัดเจน เห็นข้อมูลครบถ้วน
+                <!-- Loading Section -->
+                <div id="loadingSection" class="text-center d-none">
+                    <div class="spinner-border text-primary" style="width: 3rem; height: 3rem;">
+                        <span class="visually-hidden">กำลังโหลด...</span>
+                    </div>
+                    <p class="mt-3">กำลังค้นหาข้อมูล...</p>
                 </div>
+                
+                <?php endif; ?>
             </div>
-
-            <!-- Submit Section -->
-            <div class="form-section text-center">
-                <button type="submit" class="btn btn-primary btn-lg" id="submitBtn">
-                    <i class="fas fa-upload me-2"></i>อัพโหลดสลิป
-                </button>
-                <div class="mt-3">
-                    <small class="text-muted">
-                        ข้อมูลจะถูกส่งไปยังเจ้าหน้าที่เพื่อตรวจสอบและอนุมัติ
-                    </small>
-                </div>
-            </div>
-        </form>
+        </div>
     </div>
-
+    
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
     <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
     
     <script>
-        // File upload handling
-        const uploadArea = document.getElementById('uploadArea');
-        const fileInput = document.getElementById('slip_image');
+        // ค้นหาข้อมูลนักเรียน
+        document.getElementById('searchForm').addEventListener('submit', function(e) {
+            e.preventDefault();
+            const studentCode = document.getElementById('studentCode').value.trim();
+            
+            if (!studentCode) {
+                alert('กรุณากรอกรหัสนักเรียน');
+                return;
+            }
+            
+            if (studentCode.length !== 11) {
+                alert('รหัสนักเรียนต้องเป็น 11 หลัก');
+                return;
+            }
+            
+            // แสดง loading
+            document.getElementById('loadingSection').classList.remove('d-none');
+            
+            // ค้นหาข้อมูลนักเรียน
+            $.ajax({
+                url: 'get_student_color.php',
+                method: 'POST',
+                data: { student_code: studentCode },
+                dataType: 'json',
+                success: function(response) {
+                    document.getElementById('loadingSection').classList.add('d-none');
+                    
+                    if (response.success) {
+                        showStudentInfo(response.data);
+                    } else {
+                        alert(response.message);
+                    }
+                },
+                error: function() {
+                    document.getElementById('loadingSection').classList.add('d-none');
+                    alert('เกิดข้อผิดพลาดในการค้นหาข้อมูล');
+                }
+            });
+        });
+        
+        // แสดงข้อมูลนักเรียน
+        function showStudentInfo(student) {
+            const studentInfoDisplay = document.getElementById('studentInfoDisplay');
+            const bankInfoCard = document.getElementById('bankInfoCard');
+            const amount = document.getElementById('amount');
+            const hiddenStudentCode = document.getElementById('hiddenStudentCode');
+            
+            // ตั้งค่า hidden field
+            hiddenStudentCode.value = student.student_code;
+            
+            // แสดงข้อมูลนักเรียน
+            studentInfoDisplay.innerHTML = `
+                <div class="row">
+                    <div class="col-md-8">
+                        <h6><strong>${student.student_name}</strong></h6>
+                        <p class="mb-1"><strong>รหัสนักเรียน:</strong> ${student.student_code}</p>
+                    </div>
+                    <div class="col-md-4 text-end">
+                        <div class="d-flex align-items-center justify-content-end">
+                            <span class="color-badge" style="background-color: ${student.color_code}"></span>
+                            <strong>${student.color_name}</strong>
+                        </div>
+                    </div>
+                </div>
+            `;
+            
+            // ข้อมูลธนาคารเริ่มต้น (ควรดึงจากฐานข้อมูลจริง)
+            const bankInfo = {
+                bank_name: 'ธนาคารกรุงไทย',
+                account_number: '1234567890',
+                account_name: 'กิจกรรมนักเรียน วิทยาลัยการอาชีพปราสาท',
+                fee_amount: 150.00
+            };
+            
+            // แสดงข้อมูลธนาคาร
+            bankInfoCard.innerHTML = `
+                <div class="bank-info-card" style="border-left-color: ${student.color_code}">
+                    <h5><i class="fas fa-university me-2"></i>ข้อมูลการโอนเงิน ${student.color_name}</h5>
+                    <div class="row">
+                        <div class="col-md-6">
+                            <p class="mb-2"><strong>ธนาคาร:</strong> ${bankInfo.bank_name}</p>
+                            <p class="mb-2"><strong>เลขที่บัญชี:</strong> ${bankInfo.account_number}</p>
+                            <p class="mb-2"><strong>ชื่อบัญชี:</strong> ${bankInfo.account_name}</p>
+                        </div>
+                        <div class="col-md-6">
+                            <div class="text-end">
+                                <p class="mb-1"><strong>จำนวนเงินที่ต้องโอน</strong></p>
+                                <h3 class="text-success mb-0">${bankInfo.fee_amount.toLocaleString('th-TH', {minimumFractionDigits: 2})} บาท</h3>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="alert alert-warning mt-3 mb-0">
+                        <i class="fas fa-exclamation-triangle me-2"></i>
+                        <strong>หมายเหตุ:</strong> กรุณาโอนเงินให้ตรงตามจำนวนที่กำหนด และเก็บหลักฐานการโอนเงินไว้อัพโหลดในขั้นตอนถัดไป
+                    </div>
+                </div>
+            `;
+            
+            // ตั้งค่าจำนวนเงิน
+            amount.value = bankInfo.fee_amount.toFixed(2);
+            
+            // ตั้งค่าวันที่เป็นวันปัจจุบัน
+            document.getElementById('transferDate').value = new Date().toISOString().split('T')[0];
+            
+            // แสดงส่วนข้อมูลนักเรียน
+            document.getElementById('studentInfoSection').classList.remove('d-none');
+            
+            // เลื่อนไปยังส่วนข้อมูลนักเรียน
+            document.getElementById('studentInfoSection').scrollIntoView({ behavior: 'smooth' });
+        }
+        
+        // จัดการการอัพโหลดไฟล์
+        const slipImage = document.getElementById('slipImage');
+        const uploadArea = document.querySelector('.upload-area');
         const uploadPrompt = document.getElementById('uploadPrompt');
         const imagePreview = document.getElementById('imagePreview');
         const previewImg = document.getElementById('previewImg');
-
-        // Click to upload
-        uploadArea.addEventListener('click', () => fileInput.click());
-
+        
+        slipImage.addEventListener('change', handleFileSelect);
+        
         // Drag and drop
-        uploadArea.addEventListener('dragover', (e) => {
+        uploadArea.addEventListener('dragover', function(e) {
             e.preventDefault();
             uploadArea.classList.add('dragover');
         });
-
-        uploadArea.addEventListener('dragleave', () => {
+        
+        uploadArea.addEventListener('dragleave', function(e) {
+            e.preventDefault();
             uploadArea.classList.remove('dragover');
         });
-
-        uploadArea.addEventListener('drop', (e) => {
+        
+        uploadArea.addEventListener('drop', function(e) {
             e.preventDefault();
             uploadArea.classList.remove('dragover');
             
             const files = e.dataTransfer.files;
             if (files.length > 0) {
-                fileInput.files = files;
-                handleFileSelect(files[0]);
+                slipImage.files = files;
+                handleFileSelect();
             }
         });
-
-        // File input change
-        fileInput.addEventListener('change', (e) => {
-            if (e.target.files.length > 0) {
-                handleFileSelect(e.target.files[0]);
-            }
-        });
-
-        function handleFileSelect(file) {
-            // Validate file type
-            const allowedTypes = ['image/jpeg', 'image/jpg', 'image/png'];
-            if (!allowedTypes.includes(file.type)) {
-                alert('รองรับเฉพาะไฟล์ JPG, JPEG และ PNG');
+        
+        function handleFileSelect() {
+            const file = slipImage.files[0];
+            
+            if (!file) return;
+            
+            // ตรวจสอบประเภทไฟล์
+            if (!file.type.match('image.*')) {
+                alert('กรุณาเลือกไฟล์ภาพเท่านั้น');
+                slipImage.value = '';
                 return;
             }
-
-            // Validate file size (5MB)
+            
+            // ตรวจสอบขนาดไฟล์ (5MB)
             if (file.size > 5 * 1024 * 1024) {
-                alert('ไฟล์ใหญ่เกินไป (สูงสุด 5MB)');
+                alert('ขนาดไฟล์ต้องไม่เกิน 5MB');
+                slipImage.value = '';
                 return;
             }
-
-            // Show preview
+            
+            // แสดงตัวอย่างภาพ
             const reader = new FileReader();
-            reader.onload = (e) => {
+            reader.onload = function(e) {
                 previewImg.src = e.target.result;
-                uploadPrompt.style.display = 'none';
-                imagePreview.style.display = 'block';
+                uploadPrompt.classList.add('d-none');
+                imagePreview.classList.remove('d-none');
             };
             reader.readAsDataURL(file);
         }
-
-        // Student code lookup
-        $('#student_code').on('input', function() {
-            const studentCode = $(this).val();
+        
+        function removeImage() {
+            slipImage.value = '';
+            uploadPrompt.classList.remove('d-none');
+            imagePreview.classList.add('d-none');
+        }
+        
+        // ส่งข้อมูล
+        document.getElementById('uploadForm').addEventListener('submit', function(e) {
+            // ตรวจสอบข้อมูล
+            if (!slipImage.files[0]) {
+                e.preventDefault();
+                alert('กรุณาเลือกรูปสลิป');
+                return;
+            }
             
-            if (studentCode.length === 11) {
-                // Check student color
-                $.ajax({
-                    url: 'ajax/get_student_color.php',
-                    method: 'POST',
-                    data: { student_code: studentCode },
-                    dataType: 'json',
-                    success: function(response) {
-                        if (response.success) {
-                            $('#colorDisplay').html(
-                                '<div class="d-flex align-items-center">' +
-                                '<span class="color-preview" style="background-color: ' + response.data.color_code + '"></span>' +
-                                '<strong>' + response.data.color_name + '</strong>' +
-                                '</div>' +
-                                '<small class="text-muted">ปีการศึกษา ' + response.data.academic_year + '/' + response.data.semester + '</small>'
-                            );
-                            $('#studentColorInfo').show();
-                            $('#noColorInfo').hide();
-                        } else {
-                            $('#studentColorInfo').hide();
-                            $('#noColorInfo').show().html(
-                                '<span class="text-danger">' + response.message + '</span>'
-                            );
-                        }
-                    },
-                    error: function() {
-                        $('#studentColorInfo').hide();
-                        $('#noColorInfo').show().html(
-                            '<span class="text-danger">เกิดข้อผิดพลาดในการตรวจสอบข้อมูล</span>'
-                        );
-                    }
-                });
-            } else {
-                $('#studentColorInfo').hide();
-                $('#noColorInfo').show().html('กรอกรหัสนักเรียนเพื่อดูข้อมูลสี');
-            }
-        });
-
-        // Set default transfer date to today
-        document.getElementById('transfer_date').value = new Date().toISOString().split('T')[0];
-
-        // Form validation
-        $('#uploadForm').on('submit', function(e) {
-            const studentCode = $('#student_code').val();
-            const amount = $('#amount').val();
-            const transferDate = $('#transfer_date').val();
-            const file = $('#slip_image')[0].files[0];
-
-            if (!studentCode || studentCode.length !== 11) {
-                e.preventDefault();
-                alert('กรุณากรอกรหัสนักเรียน 11 หลัก');
-                return;
-            }
-
-            if (!amount || amount <= 0) {
-                e.preventDefault();
-                alert('กรุณากรอกจำนวนเงินที่ถูกต้อง');
-                return;
-            }
-
-            if (!transferDate) {
+            if (!document.getElementById('transferDate').value) {
                 e.preventDefault();
                 alert('กรุณาเลือกวันที่โอนเงิน');
                 return;
             }
-
-            if (!file) {
-                e.preventDefault();
-                alert('กรุณาอัพโหลดรูปสลิป');
-                return;
+            
+            // แสดง loading
+            document.getElementById('studentInfoSection').classList.add('d-none');
+            document.getElementById('loadingSection').classList.remove('d-none');
+            document.getElementById('loadingSection').querySelector('p').textContent = 'กำลังอัพโหลด...';
+        });
+        
+        // Enter key support for student code
+        document.getElementById('studentCode').addEventListener('keypress', function(e) {
+            if (e.key === 'Enter') {
+                document.getElementById('searchForm').dispatchEvent(new Event('submit'));
             }
-
-            // Disable submit button to prevent double submission
-            $('#submitBtn').prop('disabled', true).html(
-                '<i class="fas fa-spinner fa-spin me-2"></i>กำลังอัพโหลด...'
-            );
         });
     </script>
 </body>
