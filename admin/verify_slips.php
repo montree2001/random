@@ -422,7 +422,7 @@ $colors = $colors_stmt->fetchAll();
                                                 <?php endif; ?>
                                             </td>
                                             <td>
-                                                <img src="uploads/slips/<?php echo htmlspecialchars($slip['slip_image']); ?>" 
+                                                <img src="../uploads/slips/<?php echo htmlspecialchars($slip['slip_image']); ?>" 
                                                      class="slip-thumbnail" 
                                                      onclick="showSlipModal('<?php echo htmlspecialchars($slip['slip_image']); ?>', '<?php echo htmlspecialchars($slip['student_code']); ?>')"
                                                      alt="สลิป">
@@ -553,7 +553,7 @@ $colors = $colors_stmt->fetchAll();
     <script>
         // แสดงภาพสลิป
         function showSlipModal(imageName, studentCode) {
-            document.getElementById('modalSlipImage').src = 'uploads/slips/' + imageName;
+            document.getElementById('modalSlipImage').src = '../uploads/slips/' + imageName;
             document.querySelector('#slipImageModal .modal-title').textContent = 'สลิปการโอนเงิน - ' + studentCode;
             new bootstrap.Modal(document.getElementById('slipImageModal')).show();
         }
@@ -606,7 +606,7 @@ $colors = $colors_stmt->fetchAll();
                     </div>
                     <div class="col-md-6">
                         <h6>สลิปการโอนเงิน</h6>
-                        <img src="uploads/slips/${slip.slip_image}" 
+                        <img src="../uploads/slips/${slip.slip_image}" 
                              class="img-fluid rounded" 
                              style="max-height: 200px; cursor: pointer;"
                              onclick="showSlipModal('${slip.slip_image}', '${slip.student_code}')"

@@ -18,17 +18,55 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $ref_number = trim($_POST['ref_number']) ?: null;
         $notes = trim($_POST['notes']) ?: null;
 
-        // ตรวจสอบข้อมูลนักเรียน
-        $student_query = "
-            SELECT s.student_id, sc.color_id, sc.academic_year_id 
+        // ตรวจสอบข้อมูลนักเรียน - ลองทั้งสองตาราง
+        $student = null;
+        
+        // ลองค้นหาในตาราง student_sport_colors ก่อน (ตามผลจาก debug)
+        $student_query1 = "
+            SELECT s.student_id, ssc.color_id, ssc.academic_year_id, 'sport' as table_used
             FROM students s
-            JOIN student_colors sc ON s.student_id = sc.student_id
-            JOIN academic_years ay ON sc.academic_year_id = ay.academic_year_id
-            WHERE s.student_code = ? AND ay.is_active = 1 AND s.status = 'กำลังศึกษา'
+            JOIN student_sport_colors ssc ON s.student_id = ssc.student_id
+            JOIN academic_years ay ON ssc.academic_year_id = ay.academic_year_id
+            WHERE s.student_code = ? AND ay.is_active = 1 AND s.status = 'กำลังศึกษา' AND ssc.is_active = 1
+            LIMIT 1
         ";
-        $student_stmt = $db->prepare($student_query);
-        $student_stmt->execute([$student_code]);
-        $student = $student_stmt->fetch();
+        
+        try {
+            $student_stmt1 = $db->prepare($student_query1);
+            $student_stmt1->execute([$student_code]);
+            $student = $student_stmt1->fetch();
+            
+            if ($student) {
+                // พบข้อมูลในตาราง student_sport_colors
+                error_log("Found student in student_sport_colors: " . json_encode($student));
+            }
+        } catch (Exception $e) {
+            error_log("Error with student_sport_colors table: " . $e->getMessage());
+        }
+        
+        // ถ้าไม่เจอ ลองค้นหาในตาราง student_colors
+        if (!$student) {
+            $student_query2 = "
+                SELECT s.student_id, sc.color_id, sc.academic_year_id, 'colors' as table_used
+                FROM students s
+                JOIN student_colors sc ON s.student_id = sc.student_id
+                JOIN academic_years ay ON sc.academic_year_id = ay.academic_year_id
+                WHERE s.student_code = ? AND ay.is_active = 1 AND s.status = 'กำลังศึกษา'
+                LIMIT 1
+            ";
+            
+            try {
+                $student_stmt2 = $db->prepare($student_query2);
+                $student_stmt2->execute([$student_code]);
+                $student = $student_stmt2->fetch();
+                
+                if ($student) {
+                    error_log("Found student in student_colors: " . json_encode($student));
+                }
+            } catch (Exception $e) {
+                error_log("Error with student_colors table: " . $e->getMessage());
+            }
+        }
 
         if (!$student) {
             throw new Exception('ไม่พบรหัสนักเรียนหรือยังไม่ได้จัดสี');
@@ -576,7 +614,7 @@ $bank_accounts = [
                 bank_name: 'ธนาคารกรุงไทย',
                 account_number: '1234567890',
                 account_name: 'กิจกรรมนักเรียน วิทยาลัยการอาชีพปราสาท',
-                fee_amount: 150.00
+                fee_amount: student.fee_amount || 150.00 // ใช้ยอดเงินจากฐานข้อมูล
             };
             
             // แสดงข้อมูลธนาคาร
