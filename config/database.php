@@ -2,7 +2,7 @@
 // config/database.php
 class Database {
     private $host = "localhost";
-    private $database_name = "random"; // ใช้ฐานข้อมูลเดิม
+    private $database_name = "pp"; // ใช้ฐานข้อมูลเดิม
     private $username = "root";
     private $password = "";
     public $conn;
