@@ -1,162 +1,166 @@
 <?php
-// admin/verify_slips.php
+// verify_slips.php - หน้าตรวจสอบสลิปของแอดมิน
+require_once '../config/database.php';
 session_start();
 
-if (!isset($_SESSION['admin_logged_in'])) {
-    header('Location: login.php');
-    exit;
-}
-
-require_once '../config/database.php';
+// ตรวจสอบสิทธิ์แอดมิน
+// if (!isset($_SESSION['admin_logged_in'])) {
+//     header('Location: login.php');
+//     exit;
+// }
 
 $database = new Database();
 $db = $database->getConnection();
 
-$message = '';
-$message_type = '';
-
-// ดึงปีการศึกษาปัจจุบัน
-$query = "SELECT * FROM academic_years WHERE is_active = 1";
-$stmt = $db->prepare($query);
-$stmt->execute();
-$current_year = $stmt->fetch();
-
-// อนุมัติหรือปฏิเสธสลิป
-if (isset($_POST['verify_slip'])) {
+// จัดการการอัปเดตสถานะสลิป
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['verify_slip'])) {
     $slip_id = $_POST['slip_id'];
-    $action = $_POST['action']; // 'approve' หรือ 'reject'
-    $verification_notes = trim($_POST['verification_notes']);
-    
-    if (!empty($slip_id) && !empty($action)) {
-        try {
-            $db->beginTransaction();
-            
-            $status = ($action === 'approve') ? 'approved' : 'rejected';
-            
-            // อัพเดตสถานะสลิป
-            $query = "UPDATE payment_slips 
-                     SET status = ?, verified_by = ?, verified_at = NOW(), verification_notes = ?
-                     WHERE slip_id = ?";
-            $stmt = $db->prepare($query);
-            $stmt->execute([$status, $_SESSION['admin_id'], $verification_notes, $slip_id]);
-            
-            // ถ้าอนุมัติ ให้สร้างรายการในตาราง sport_color_payments
-            if ($action === 'approve') {
-                // ดึงข้อมูลสลิป
-                $query = "SELECT * FROM payment_slips WHERE slip_id = ?";
-                $stmt = $db->prepare($query);
-                $stmt->execute([$slip_id]);
-                $slip = $stmt->fetch();
-                
-                if ($slip) {
-                    // เพิ่มรายการจ่ายเงิน
-                    $query = "INSERT INTO sport_color_payments 
-                             (student_id, academic_year_id, amount, payment_date, payment_method, 
-                              receipt_number, notes, recorded_by) 
-                             VALUES (?, ?, ?, ?, ?, ?, ?, ?)";
-                    $stmt = $db->prepare($query);
-                    $notes = "อนุมัติจากสลิปโอนเงิน (Ref: " . $slip['ref_number'] . ")";
-                    $stmt->execute([
-                        $slip['student_id'],
-                        $slip['academic_year_id'],
-                        $slip['amount'],
-                        $slip['transfer_date'],
-                        'โอนเงิน',
-                        $slip['ref_number'],
-                        $notes,
-                        $_SESSION['admin_id']
-                    ]);
-                }
-            }
-            
-            $db->commit();
-            $message = ($action === 'approve') ? 'อนุมัติสลิปเรียบร้อยแล้ว' : 'ปฏิเสธสลิปเรียบร้อยแล้ว';
-            $message_type = 'success';
-            
-        } catch (Exception $e) {
-            $db->rollback();
-            $message = 'เกิดข้อผิดพลาด: ' . $e->getMessage();
-            $message_type = 'danger';
+    $action = $_POST['action']; // approve, reject
+    $verification_notes = $_POST['verification_notes'] ?? '';
+    $verified_by = $_SESSION['admin_id'] ?? 1; // ใช้ admin_id จาก session
+
+    try {
+        $db->beginTransaction();
+        
+        $status = ($action === 'approve') ? 'approved' : 'rejected';
+        
+        $update_query = "UPDATE payment_slips 
+                        SET status = ?, 
+                            verified_by = ?, 
+                            verified_at = NOW(), 
+                            verification_notes = ? 
+                        WHERE slip_id = ?";
+        
+        $update_stmt = $db->prepare($update_query);
+        $update_stmt->execute([$status, $verified_by, $verification_notes, $slip_id]);
+        
+        $db->commit();
+        $success_message = ($action === 'approve') ? 'อนุมัติสลิปเรียบร้อยแล้ว' : 'ปฏิเสธสลิปเรียบร้อยแล้ว';
+        
+    } catch (Exception $e) {
+        if ($db->inTransaction()) {
+            $db->rollBack();
         }
+        $error_message = 'เกิดข้อผิดพลาด: ' . $e->getMessage();
     }
 }
 
-// ฟิลเตอร์
+// ดึงปีการศึกษาปัจจุบัน
+$current_academic_year_query = "SELECT * FROM academic_years WHERE is_active = 1 LIMIT 1";
+$current_academic_year_stmt = $db->prepare($current_academic_year_query);
+$current_academic_year_stmt->execute();
+$current_academic_year = $current_academic_year_stmt->fetch();
+
+if (!$current_academic_year) {
+    $error_message = 'ไม่พบปีการศึกษาปัจจุบัน กรุณาตั้งค่าปีการศึกษาปัจจุบัน';
+}
+
+// ตัวกรองและการค้นหา
 $status_filter = $_GET['status_filter'] ?? 'pending';
 $color_filter = $_GET['color_filter'] ?? '';
 $date_from = $_GET['date_from'] ?? '';
 $date_to = $_GET['date_to'] ?? '';
 $search = $_GET['search'] ?? '';
 
-// ดึงข้อมูลสลิป
-$where_conditions = ["ps.academic_year_id = ?"];
-$params = [$current_year['academic_year_id']];
+// สร้าง WHERE clause
+$where_conditions = [];
+$params = [];
 
-if (!empty($status_filter)) {
+if ($current_academic_year) {
+    $where_conditions[] = "ps.academic_year_id = ?";
+    $params[] = $current_academic_year['academic_year_id'];
+}
+
+if ($status_filter !== 'all') {
     $where_conditions[] = "ps.status = ?";
     $params[] = $status_filter;
 }
 
-if (!empty($color_filter)) {
+if ($color_filter) {
     $where_conditions[] = "ps.color_id = ?";
     $params[] = $color_filter;
 }
 
-if (!empty($date_from)) {
+if ($date_from) {
     $where_conditions[] = "ps.transfer_date >= ?";
     $params[] = $date_from;
 }
 
-if (!empty($date_to)) {
+if ($date_to) {
     $where_conditions[] = "ps.transfer_date <= ?";
     $params[] = $date_to;
 }
 
-if (!empty($search)) {
-    $where_conditions[] = "(s.student_code LIKE ? OR u.first_name LIKE ? OR u.last_name LIKE ?)";
+if ($search) {
+    $where_conditions[] = "(s.student_code LIKE ? OR u.first_name LIKE ? OR u.last_name LIKE ? OR ps.ref_number LIKE ?)";
     $search_param = "%$search%";
-    $params = array_merge($params, [$search_param, $search_param, $search_param]);
+    $params = array_merge($params, [$search_param, $search_param, $search_param, $search_param]);
 }
 
-$where_clause = implode(' AND ', $where_conditions);
+$where_clause = !empty($where_conditions) ? 'WHERE ' . implode(' AND ', $where_conditions) : '';
 
-$query = "SELECT ps.*, 
-                 s.student_code, s.title, u.first_name, u.last_name,
-                 c.level, d.department_name, c.group_number,
-                 sc.color_name, sc.color_code, sc.fee_amount,
-                 CONCAT(admin.title, admin.first_name, ' ', admin.last_name) as verified_by_name
-          FROM payment_slips ps
-          JOIN students s ON ps.student_id = s.student_id
-          JOIN users u ON s.user_id = u.user_id
-          JOIN sport_colors sc ON ps.color_id = sc.color_id
-          LEFT JOIN classes c ON s.current_class_id = c.class_id
-          LEFT JOIN departments d ON c.department_id = d.department_id
-          LEFT JOIN admin_users admin ON ps.verified_by = admin.admin_id
-          WHERE $where_clause
-          ORDER BY ps.created_at DESC";
+// ดึงข้อมูลสลิป
+$slips_query = "
+    SELECT 
+        ps.*,
+        s.student_code,
+        s.title as student_title,
+        u.first_name,
+        u.last_name,
+        c.color_name,
+        c.color_code,
+        ay.year as academic_year,
+        ay.semester,
+        cl.level,
+        d.department_name,
+        cl.group_number,
+        admin_u.first_name as verified_by_first_name,
+        admin_u.last_name as verified_by_last_name
+    FROM payment_slips ps
+    JOIN students s ON ps.student_id = s.student_id
+    JOIN users u ON s.user_id = u.user_id
+    JOIN colors c ON ps.color_id = c.color_id
+    JOIN academic_years ay ON ps.academic_year_id = ay.academic_year_id
+    LEFT JOIN classes cl ON s.current_class_id = cl.class_id
+    LEFT JOIN departments d ON cl.department_id = d.department_id
+    LEFT JOIN users admin_u ON ps.verified_by = admin_u.user_id
+    $where_clause
+    ORDER BY ps.created_at DESC
+";
 
-$stmt = $db->prepare($query);
-$stmt->execute($params);
-$slips = $stmt->fetchAll();
+$slips_stmt = $db->prepare($slips_query);
+$slips_stmt->execute($params);
+$slips = $slips_stmt->fetchAll();
 
-// สถิติ
-$query = "SELECT 
-            COUNT(*) as total_slips,
-            COUNT(CASE WHEN status = 'pending' THEN 1 END) as pending_count,
-            COUNT(CASE WHEN status = 'approved' THEN 1 END) as approved_count,
-            COUNT(CASE WHEN status = 'rejected' THEN 1 END) as rejected_count,
-            SUM(CASE WHEN status = 'approved' THEN amount ELSE 0 END) as approved_amount
-          FROM payment_slips 
-          WHERE academic_year_id = ?";
-$stmt = $db->prepare($query);
-$stmt->execute([$current_year['academic_year_id']]);
-$stats = $stmt->fetch();
+// นับจำนวนตามสถานะ
+$status_counts_query = "
+    SELECT 
+        ps.status,
+        COUNT(*) as count,
+        COALESCE(SUM(ps.amount), 0) as total_amount
+    FROM payment_slips ps
+    " . ($current_academic_year ? "WHERE ps.academic_year_id = ?" : "") . "
+    GROUP BY ps.status
+";
+$status_counts_stmt = $db->prepare($status_counts_query);
+if ($current_academic_year) {
+    $status_counts_stmt->execute([$current_academic_year['academic_year_id']]);
+} else {
+    $status_counts_stmt->execute();
+}
 
-// ดึงสีทั้งหมด
-$query = "SELECT * FROM sport_colors WHERE is_active = 1 ORDER BY color_name";
-$stmt = $db->prepare($query);
-$stmt->execute();
-$colors = $stmt->fetchAll();
+$status_counts = [];
+$status_amounts = [];
+while ($row = $status_counts_stmt->fetch()) {
+    $status_counts[$row['status']] = $row['count'];
+    $status_amounts[$row['status']] = $row['total_amount'];
+}
+
+// ดึงข้อมูลสีทั้งหมด
+$colors_query = "SELECT * FROM colors WHERE is_active = 1 ORDER BY color_name";
+$colors_stmt = $db->prepare($colors_query);
+$colors_stmt->execute();
+$colors = $colors_stmt->fetchAll();
 ?>
 
 <!DOCTYPE html>
@@ -229,20 +233,29 @@ $colors = $stmt->fetchAll();
     <div class="container-fluid">
         <div class="row">
             <!-- Sidebar -->
-            <?php include 'menu.php'; ?>
+          <?php include 'menu.php'; ?>
             
             <!-- Main Content -->
             <div class="col-md-9 p-4">
                 <div class="d-flex justify-content-between align-items-center mb-4">
                     <h2><i class="fas fa-receipt"></i> ตรวจสอบสลิปการโอนเงิน</h2>
+                    <?php if ($current_academic_year): ?>
                     <div class="text-muted">
-                        ปีการศึกษา <?php echo $current_year['year']; ?> ภาคเรียนที่ <?php echo $current_year['semester']; ?>
+                        ปีการศึกษา <?php echo $current_academic_year['year']; ?> ภาคเรียนที่ <?php echo $current_academic_year['semester']; ?>
                     </div>
+                    <?php endif; ?>
                 </div>
                 
-                <?php if ($message): ?>
-                    <div class="alert alert-<?php echo $message_type; ?> alert-dismissible fade show">
-                        <?php echo $message; ?>
+                <?php if (isset($success_message)): ?>
+                    <div class="alert alert-success alert-dismissible fade show">
+                        <?php echo $success_message; ?>
+                        <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+                    </div>
+                <?php endif; ?>
+                
+                <?php if (isset($error_message)): ?>
+                    <div class="alert alert-danger alert-dismissible fade show">
+                        <?php echo $error_message; ?>
                         <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
                     </div>
                 <?php endif; ?>
@@ -254,8 +267,8 @@ $colors = $stmt->fetchAll();
                             <div class="card-body">
                                 <i class="fas fa-clock fa-2x mb-2"></i>
                                 <h5>รอตรวจสอบ</h5>
-                                <h3><?php echo number_format($stats['pending_count']); ?></h3>
-                                <small>รายการ</small>
+                                <h3><?php echo number_format($status_counts['pending'] ?? 0); ?></h3>
+                                <small><?php echo number_format($status_amounts['pending'] ?? 0, 0); ?> บาท</small>
                             </div>
                         </div>
                     </div>
@@ -264,8 +277,8 @@ $colors = $stmt->fetchAll();
                             <div class="card-body">
                                 <i class="fas fa-check fa-2x mb-2"></i>
                                 <h5>อนุมัติแล้ว</h5>
-                                <h3><?php echo number_format($stats['approved_count']); ?></h3>
-                                <small>รายการ</small>
+                                <h3><?php echo number_format($status_counts['approved'] ?? 0); ?></h3>
+                                <small><?php echo number_format($status_amounts['approved'] ?? 0, 0); ?> บาท</small>
                             </div>
                         </div>
                     </div>
@@ -274,8 +287,8 @@ $colors = $stmt->fetchAll();
                             <div class="card-body">
                                 <i class="fas fa-times fa-2x mb-2"></i>
                                 <h5>ปฏิเสธ</h5>
-                                <h3><?php echo number_format($stats['rejected_count']); ?></h3>
-                                <small>รายการ</small>
+                                <h3><?php echo number_format($status_counts['rejected'] ?? 0); ?></h3>
+                                <small><?php echo number_format($status_amounts['rejected'] ?? 0, 0); ?> บาท</small>
                             </div>
                         </div>
                     </div>
@@ -283,9 +296,9 @@ $colors = $stmt->fetchAll();
                         <div class="card text-center bg-info text-white">
                             <div class="card-body">
                                 <i class="fas fa-money-bill fa-2x mb-2"></i>
-                                <h5>ยอดอนุมัติ</h5>
-                                <h3><?php echo number_format($stats['approved_amount'], 0); ?></h3>
-                                <small>บาท</small>
+                                <h5>ยอดรวม</h5>
+                                <h3><?php echo number_format(array_sum($status_counts)); ?></h3>
+                                <small><?php echo number_format(array_sum($status_amounts), 0); ?> บาท</small>
                             </div>
                         </div>
                     </div>
@@ -306,7 +319,7 @@ $colors = $stmt->fetchAll();
                                     <option value="pending" <?php echo $status_filter === 'pending' ? 'selected' : ''; ?>>รอตรวจสอบ</option>
                                     <option value="approved" <?php echo $status_filter === 'approved' ? 'selected' : ''; ?>>อนุมัติแล้ว</option>
                                     <option value="rejected" <?php echo $status_filter === 'rejected' ? 'selected' : ''; ?>>ปฏิเสธ</option>
-                                    <option value="" <?php echo $status_filter === '' ? 'selected' : ''; ?>>ทั้งหมด</option>
+                                    <option value="all" <?php echo $status_filter === 'all' ? 'selected' : ''; ?>>ทั้งหมด</option>
                                 </select>
                             </div>
                             <div class="col-md-2">
@@ -316,7 +329,7 @@ $colors = $stmt->fetchAll();
                                     <?php foreach ($colors as $color): ?>
                                         <option value="<?php echo $color['color_id']; ?>" 
                                                 <?php echo $color_filter == $color['color_id'] ? 'selected' : ''; ?>>
-                                            <?php echo $color['color_name']; ?>
+                                            <?php echo htmlspecialchars($color['color_name']); ?>
                                         </option>
                                     <?php endforeach; ?>
                                 </select>
@@ -369,29 +382,38 @@ $colors = $stmt->fetchAll();
                                     </tr>
                                 </thead>
                                 <tbody>
+                                    <?php if (empty($slips)): ?>
+                                    <tr>
+                                        <td colspan="10" class="text-center py-4">
+                                            <i class="fas fa-receipt fa-3x text-muted"></i>
+                                            <p class="mt-2 text-muted">ไม่พบข้อมูลสลิป</p>
+                                        </td>
+                                    </tr>
+                                    <?php else: ?>
                                     <?php foreach ($slips as $slip): ?>
                                         <tr class="status-<?php echo $slip['status']; ?>">
                                             <td>
                                                 <small><?php echo date('d/m/Y H:i', strtotime($slip['created_at'])); ?></small>
                                             </td>
                                             <td>
-                                                <strong><?php echo $slip['student_code']; ?></strong><br>
-                                                <small><?php echo $slip['title'] . $slip['first_name'] . ' ' . $slip['last_name']; ?></small>
+                                                <strong><?php echo htmlspecialchars($slip['student_code']); ?></strong><br>
+                                                <small><?php echo htmlspecialchars(($slip['student_title'] ?? '') . $slip['first_name'] . ' ' . $slip['last_name']); ?></small>
                                             </td>
                                             <td>
-                                                <small><?php echo $slip['level'] . ' ' . $slip['department_name'] . ' ' . $slip['group_number']; ?></small>
+                                                <?php if ($slip['level']): ?>
+                                                <small><?php echo htmlspecialchars($slip['level'] . ' ' . ($slip['department_name'] ?? '') . ' ' . ($slip['group_number'] ?? '')); ?></small>
+                                                <?php else: ?>
+                                                <small class="text-muted">-</small>
+                                                <?php endif; ?>
                                             </td>
                                             <td>
                                                 <span class="color-badge" style="background-color: <?php echo $slip['color_code']; ?>"></span>
-                                                <?php echo $slip['color_name']; ?>
+                                                <?php echo htmlspecialchars($slip['color_name']); ?>
                                             </td>
                                             <td>
-                                                <strong class="<?php echo $slip['amount'] == $slip['fee_amount'] ? 'text-success' : 'text-warning'; ?>">
+                                                <strong class="text-primary">
                                                     <?php echo number_format($slip['amount'], 2); ?> บาท
                                                 </strong>
-                                                <?php if ($slip['amount'] != $slip['fee_amount']): ?>
-                                                    <br><small class="text-muted">ควรเป็น <?php echo number_format($slip['fee_amount'], 2); ?></small>
-                                                <?php endif; ?>
                                             </td>
                                             <td>
                                                 <?php echo date('d/m/Y', strtotime($slip['transfer_date'])); ?>
@@ -400,9 +422,9 @@ $colors = $stmt->fetchAll();
                                                 <?php endif; ?>
                                             </td>
                                             <td>
-                                                <img src="../uploads/payment_slips/<?php echo $slip['slip_image']; ?>" 
+                                                <img src="uploads/slips/<?php echo htmlspecialchars($slip['slip_image']); ?>" 
                                                      class="slip-thumbnail" 
-                                                     onclick="showSlipModal('<?php echo $slip['slip_image']; ?>', '<?php echo $slip['student_code']; ?>')"
+                                                     onclick="showSlipModal('<?php echo htmlspecialchars($slip['slip_image']); ?>', '<?php echo htmlspecialchars($slip['student_code']); ?>')"
                                                      alt="สลิป">
                                             </td>
                                             <td>
@@ -421,7 +443,15 @@ $colors = $stmt->fetchAll();
                                                 <?php endif; ?>
                                             </td>
                                             <td>
-                                                <small><?php echo $slip['verified_by_name'] ?: '-'; ?></small>
+                                                <small>
+                                                    <?php 
+                                                    if ($slip['verified_by_first_name']) {
+                                                        echo htmlspecialchars($slip['verified_by_first_name'] . ' ' . $slip['verified_by_last_name']);
+                                                    } else {
+                                                        echo '-';
+                                                    }
+                                                    ?>
+                                                </small>
                                             </td>
                                             <td>
                                                 <div class="btn-group" role="group">
@@ -447,14 +477,6 @@ $colors = $stmt->fetchAll();
                                             </td>
                                         </tr>
                                     <?php endforeach; ?>
-                                    
-                                    <?php if (empty($slips)): ?>
-                                        <tr>
-                                            <td colspan="10" class="text-center py-4">
-                                                <i class="fas fa-receipt fa-3x text-muted"></i>
-                                                <p class="mt-2 text-muted">ไม่พบข้อมูลสลิป</p>
-                                            </td>
-                                        </tr>
                                     <?php endif; ?>
                                 </tbody>
                             </table>
@@ -531,7 +553,7 @@ $colors = $stmt->fetchAll();
     <script>
         // แสดงภาพสลิป
         function showSlipModal(imageName, studentCode) {
-            document.getElementById('modalSlipImage').src = '../uploads/payment_slips/' + imageName;
+            document.getElementById('modalSlipImage').src = 'uploads/slips/' + imageName;
             document.querySelector('#slipImageModal .modal-title').textContent = 'สลิปการโอนเงิน - ' + studentCode;
             new bootstrap.Modal(document.getElementById('slipImageModal')).show();
         }
@@ -557,8 +579,8 @@ $colors = $stmt->fetchAll();
                     <div class="col-md-6">
                         <h6>ข้อมูลนักเรียน</h6>
                         <p><strong>รหัสนักเรียน:</strong> ${slip.student_code}</p>
-                        <p><strong>ชื่อ-นามสกุล:</strong> ${slip.title}${slip.first_name} ${slip.last_name}</p>
-                        <p><strong>ชั้นเรียน:</strong> ${slip.level} ${slip.department_name} ${slip.group_number}</p>
+                        <p><strong>ชื่อ-นามสกุล:</strong> ${(slip.student_title || '') + slip.first_name} ${slip.last_name}</p>
+                        ${slip.level ? `<p><strong>ชั้นเรียน:</strong> ${slip.level} ${slip.department_name || ''} ${slip.group_number || ''}</p>` : ''}
                         <p><strong>สี:</strong> 
                             <span class="color-badge" style="background-color: ${slip.color_code}"></span>
                             ${slip.color_name}
@@ -570,6 +592,7 @@ $colors = $stmt->fetchAll();
                         <p><strong>วันที่โอน:</strong> ${new Date(slip.transfer_date).toLocaleDateString('th-TH')}</p>
                         ${slip.transfer_time ? `<p><strong>เวลาโอน:</strong> ${slip.transfer_time}</p>` : ''}
                         ${slip.bank_from ? `<p><strong>ธนาคารต้นทาง:</strong> ${slip.bank_from}</p>` : ''}
+                        ${slip.bank_to ? `<p><strong>ธนาคารปลายทาง:</strong> ${slip.bank_to}</p>` : ''}
                         ${slip.ref_number ? `<p><strong>หมายเลขอ้างอิง:</strong> ${slip.ref_number}</p>` : ''}
                     </div>
                 </div>
@@ -579,11 +602,11 @@ $colors = $stmt->fetchAll();
                         <h6>สถานะ</h6>
                         <span class="badge bg-${statusClass[slip.status]}">${statusText[slip.status]}</span>
                         ${slip.verified_at ? `<p class="mt-2 mb-0"><small>ตรวจสอบเมื่อ: ${new Date(slip.verified_at).toLocaleString('th-TH')}</small></p>` : ''}
-                        ${slip.verified_by_name ? `<p class="mb-0"><small>โดย: ${slip.verified_by_name}</small></p>` : ''}
+                        ${slip.verified_by_first_name ? `<p class="mb-0"><small>โดย: ${slip.verified_by_first_name} ${slip.verified_by_last_name}</small></p>` : ''}
                     </div>
                     <div class="col-md-6">
                         <h6>สลิปการโอนเงิน</h6>
-                        <img src="../uploads/payment_slips/${slip.slip_image}" 
+                        <img src="uploads/slips/${slip.slip_image}" 
                              class="img-fluid rounded" 
                              style="max-height: 200px; cursor: pointer;"
                              onclick="showSlipModal('${slip.slip_image}', '${slip.student_code}')"
@@ -639,8 +662,10 @@ $colors = $stmt->fetchAll();
             let csv = [];
             
             const headers = [];
-            table.querySelectorAll('thead th').forEach(th => {
-                headers.push('"' + th.textContent.trim() + '"');
+            table.querySelectorAll('thead th').forEach((th, index) => {
+                if (index < 9) { // ไม่รวมคอลัมน์จัดการ
+                    headers.push('"' + th.textContent.trim() + '"');
+                }
             });
             csv.push(headers.join(','));
             
@@ -677,6 +702,17 @@ $colors = $stmt->fetchAll();
         document.getElementById('verifyModal').addEventListener('hidden.bs.modal', function() {
             document.getElementById('verifyForm').reset();
         });
+        
+        // Auto refresh for pending slips (every 30 seconds)
+        setInterval(function() {
+            const urlParams = new URLSearchParams(window.location.search);
+            if (urlParams.get('status_filter') === 'pending' || !urlParams.get('status_filter')) {
+                // Only refresh if viewing pending slips and no manual search/filter
+                if (!urlParams.get('search') && !urlParams.get('date_from')) {
+                    window.location.reload();
+                }
+            }
+        }, 30000);
     </script>
 </body>
 </html>
