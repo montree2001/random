@@ -21,6 +21,71 @@ $stmt = $db->prepare($query);
 $stmt->execute();
 $current_year = $stmt->fetch();
 
+// อนุมัติสลิป
+if (isset($_POST['approve_slip'])) {
+    $slip_id = $_POST['slip_id'];
+    
+    try {
+        $db->beginTransaction();
+        
+        // ดึงข้อมูลสลิป
+        $slip_query = "SELECT * FROM payment_slips WHERE slip_id = ?";
+        $slip_stmt = $db->prepare($slip_query);
+        $slip_stmt->execute([$slip_id]);
+        $slip = $slip_stmt->fetch();
+        
+        if ($slip && $slip['status'] === 'pending') {
+            // อัปเดตสถานะสลิป
+            $update_slip_query = "UPDATE payment_slips SET status = 'approved', verified_by = ?, verified_at = NOW() WHERE slip_id = ?";
+            $update_slip_stmt = $db->prepare($update_slip_query);
+            $update_slip_stmt->execute([$_SESSION['admin_id'], $slip_id]);
+            
+            // บันทึกการจ่ายเงินใน sport_color_payments
+            $payment_query = "INSERT INTO sport_color_payments 
+                             (student_id, academic_year_id, amount, payment_date, payment_method, receipt_number, notes, recorded_by, created_at) 
+                             VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW())";
+            $payment_stmt = $db->prepare($payment_query);
+            $payment_stmt->execute([
+                $slip['student_id'],
+                $slip['academic_year_id'],
+                $slip['amount'],
+                $slip['transfer_date'],
+                'โอนเงิน',
+                $slip['ref_number'] ?: 'สลิป-' . $slip['slip_id'],
+                'อนุมัติจากสลิป ID: ' . $slip['slip_id'] . ($slip['notes'] ? ' | ' . $slip['notes'] : ''),
+                $_SESSION['admin_id']
+            ]);
+            
+            $db->commit();
+            $message = 'อนุมัติสลิปเรียบร้อยแล้ว';
+            $message_type = 'success';
+        }
+    } catch (Exception $e) {
+        $db->rollBack();
+        $message = 'เกิดข้อผิดพลาด: ' . $e->getMessage();
+        $message_type = 'danger';
+    }
+}
+
+// ปฏิเสธสลิป
+if (isset($_POST['reject_slip'])) {
+    $slip_id = $_POST['slip_id'];
+    $reject_reason = trim($_POST['reject_reason']);
+    
+    try {
+        // อัปเดตสถานะและเก็บเหตุผลในหมายเหตุ
+        $query = "UPDATE payment_slips SET status = 'rejected', verified_by = ?, verified_at = NOW(), notes = CONCAT(COALESCE(notes, ''), ' | ปฏิเสธ: ', ?) WHERE slip_id = ?";
+        $stmt = $db->prepare($query);
+        $stmt->execute([$_SESSION['admin_id'], $reject_reason, $slip_id]);
+        
+        $message = 'ปฏิเสธสลิปเรียบร้อยแล้ว';
+        $message_type = 'warning';
+    } catch (Exception $e) {
+        $message = 'เกิดข้อผิดพลาด: ' . $e->getMessage();
+        $message_type = 'danger';
+    }
+}
+
 // บันทึกการจ่ายเงินสด
 if (isset($_POST['add_cash_payment'])) {
     $student_id = $_POST['student_id'];
@@ -46,8 +111,10 @@ if (isset($_POST['add_cash_payment'])) {
                 $_SESSION['admin_id']
             ]);
             
+            $new_payment_id = $db->lastInsertId();
             $message = 'บันทึกการจ่ายเงินสดเรียบร้อยแล้ว';
             $message_type = 'success';
+            $show_print_button = true;
             
         } catch (Exception $e) {
             $message = 'เกิดข้อผิดพลาด: ' . $e->getMessage();
@@ -71,6 +138,26 @@ if (isset($_GET['delete']) && is_numeric($_GET['delete'])) {
         $message_type = 'success';
     }
 }
+
+// ดึงสลิปที่รออนุมัติ
+$pending_slips_query = "
+    SELECT ps.*, s.student_code, s.title, u.first_name, u.last_name,
+           sc.color_name, sc.color_code, sc.fee_amount,
+           c.level, d.department_name, c.group_number
+    FROM payment_slips ps
+    JOIN students s ON ps.student_id = s.student_id
+    JOIN users u ON s.user_id = u.user_id
+    LEFT JOIN student_sport_colors ssc ON s.student_id = ssc.student_id 
+             AND ssc.academic_year_id = ps.academic_year_id AND ssc.is_active = 1
+    LEFT JOIN sport_colors sc ON ssc.color_id = sc.color_id
+    LEFT JOIN classes c ON s.current_class_id = c.class_id
+    LEFT JOIN departments d ON c.department_id = d.department_id
+    WHERE ps.status = 'pending' AND ps.academic_year_id = ?
+    ORDER BY ps.created_at ASC
+";
+$pending_slips_stmt = $db->prepare($pending_slips_query);
+$pending_slips_stmt->execute([$current_year['academic_year_id']]);
+$pending_slips = $pending_slips_stmt->fetchAll();
 
 // ค้นหา
 $search = $_GET['search'] ?? '';
@@ -254,6 +341,40 @@ $students_with_colors = $stmt->fetchAll();
             font-size: 0.7rem;
             padding: 0.2rem 0.4rem;
         }
+        .pending-slip-card {
+            border-left: 4px solid #ffc107;
+            background: #fff9c4;
+        }
+        .slip-large {
+            max-width: 100%;
+            max-height: 400px;
+            object-fit: contain;
+        }
+        .tabs-container {
+            background: white;
+            border-radius: 10px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        .nav-tabs .nav-link {
+            border: none;
+            color: #667eea;
+            font-weight: 600;
+        }
+        .nav-tabs .nav-link.active {
+            background: #667eea;
+            color: white;
+            border-radius: 8px 8px 0 0;
+        }
+        .pending-badge {
+            background: linear-gradient(135deg, #ffc107 0%, #ff8f00 100%);
+            color: white;
+            animation: pulse 2s infinite;
+        }
+        @keyframes pulse {
+            0% { transform: scale(1); }
+            50% { transform: scale(1.05); }
+            100% { transform: scale(1); }
+        }
     </style>
 </head>
 <body>
@@ -267,6 +388,11 @@ $students_with_colors = $stmt->fetchAll();
                 <div class="d-flex justify-content-between align-items-center mb-4">
                     <h2><i class="fas fa-money-bill"></i> บันทึกการจ่ายเงิน</h2>
                     <div>
+                        <?php if (count($pending_slips) > 0): ?>
+                        <span class="badge pending-badge me-2">
+                            <i class="fas fa-clock"></i> รออนุมัติ <?php echo count($pending_slips); ?> ใบ
+                        </span>
+                        <?php endif; ?>
                         <a href="verify_slips.php" class="btn btn-info me-2">
                             <i class="fas fa-receipt"></i> ตรวจสอบสลิป
                         </a>
@@ -279,6 +405,17 @@ $students_with_colors = $stmt->fetchAll();
                 <?php if ($message): ?>
                     <div class="alert alert-<?php echo $message_type; ?> alert-dismissible fade show">
                         <?php echo $message; ?>
+                        <?php if (isset($show_print_button) && $show_print_button && isset($new_payment_id)): ?>
+                            <div class="mt-3">
+                                <div class="alert alert-success border-0 bg-light-success">
+                                    <i class="fas fa-check-circle text-success me-2"></i>
+                                    <strong>พิมพ์ใบเสร็จ:</strong> 
+                                    ไปที่แท็บ "รายการการจ่ายเงิน" แล้วคลิกปุ่ม 
+                                    <span class="badge bg-success">🖨️</span> 
+                                    เพื่อพิมพ์ใบเสร็จ
+                                </div>
+                            </div>
+                        <?php endif; ?>
                         <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
                     </div>
                 <?php endif; ?>
@@ -369,186 +506,322 @@ $students_with_colors = $stmt->fetchAll();
                     <?php endforeach; ?>
                 </div>
                 
-                <!-- ฟิลเตอร์ -->
-                <div class="card mb-4">
-                    <div class="card-body">
-                        <form method="GET" class="row g-3">
-                            <div class="col-md-2">
-                                <label class="form-label">ค้นหา</label>
-                                <input type="text" class="form-control" name="search" 
-                                       placeholder="รหัส/ชื่อ/เลขใบเสร็จ" value="<?php echo htmlspecialchars($search); ?>">
-                            </div>
-                            <div class="col-md-2">
-                                <label class="form-label">วิธีการจ่าย</label>
-                                <select class="form-select" name="payment_method_filter">
-                                    <option value="">ทั้งหมด</option>
-                                    <option value="เงินสด" <?php echo $payment_method_filter === 'เงินสด' ? 'selected' : ''; ?>>เงินสด</option>
-                                    <option value="โอนเงิน" <?php echo $payment_method_filter === 'โอนเงิน' ? 'selected' : ''; ?>>โอนเงิน</option>
-                                </select>
-                            </div>
-                            <div class="col-md-2">
-                                <label class="form-label">สี</label>
-                                <select class="form-select" name="color_filter">
-                                    <option value="">ทุกสี</option>
-                                    <?php foreach ($colors as $color): ?>
-                                        <option value="<?php echo $color['color_id']; ?>" 
-                                                <?php echo $color_filter == $color['color_id'] ? 'selected' : ''; ?>>
-                                            <?php echo $color['color_name']; ?>
-                                        </option>
+                <!-- Tabs -->
+                <div class="tabs-container">
+                    <ul class="nav nav-tabs" role="tablist">
+                        <li class="nav-item" role="presentation">
+                            <button class="nav-link active" id="pending-slips-tab" data-bs-toggle="tab" 
+                                    data-bs-target="#pending-slips" type="button" role="tab">
+                                <i class="fas fa-clock me-2"></i>สลิปรออนุมัติ
+                                <?php if (count($pending_slips) > 0): ?>
+                                    <span class="badge bg-warning text-dark ms-2"><?php echo count($pending_slips); ?></span>
+                                <?php endif; ?>
+                            </button>
+                        </li>
+                        <li class="nav-item" role="presentation">
+                            <button class="nav-link" id="payment-records-tab" data-bs-toggle="tab" 
+                                    data-bs-target="#payment-records" type="button" role="tab">
+                                <i class="fas fa-list me-2"></i>รายการการจ่ายเงิน
+                            </button>
+                        </li>
+                    </ul>
+                    
+                    <div class="tab-content p-4">
+                        <!-- สลิปรออนุมัติ -->
+                        <div class="tab-pane fade show active" id="pending-slips" role="tabpanel">
+                            <?php if (count($pending_slips) > 0): ?>
+                                <div class="row">
+                                    <?php foreach ($pending_slips as $slip): ?>
+                                        <div class="col-lg-6 mb-4">
+                                            <div class="card pending-slip-card">
+                                                <div class="card-header">
+                                                    <div class="d-flex justify-content-between align-items-center">
+                                                        <h6 class="mb-0">
+                                                            <i class="fas fa-user me-2"></i>
+                                                            <?php echo $slip['student_code']; ?> - 
+                                                            <?php echo $slip['title'] . $slip['first_name'] . ' ' . $slip['last_name']; ?>
+                                                        </h6>
+                                                        <small class="text-muted">
+                                                            <?php echo date('d/m/Y H:i', strtotime($slip['created_at'])); ?>
+                                                        </small>
+                                                    </div>
+                                                </div>
+                                                <div class="card-body">
+                                                    <div class="row">
+                                                        <div class="col-md-8">
+                                                            <div class="mb-2">
+                                                                <strong>สี:</strong>
+                                                                <?php if ($slip['color_name']): ?>
+                                                                    <span class="color-badge" style="background-color: <?php echo $slip['color_code']; ?>"></span>
+                                                                    <?php echo $slip['color_name']; ?>
+                                                                <?php else: ?>
+                                                                    <span class="text-muted">ไม่พบข้อมูลสี</span>
+                                                                <?php endif; ?>
+                                                            </div>
+                                                            <div class="mb-2">
+                                                                <strong>จำนวนเงิน:</strong> 
+                                                                <span class="text-success fw-bold"><?php echo number_format($slip['amount'], 2); ?> บาท</span>
+                                                            </div>
+                                                            <div class="mb-2">
+                                                                <strong>วันที่โอน:</strong> <?php echo date('d/m/Y', strtotime($slip['transfer_date'])); ?>
+                                                                <?php if ($slip['transfer_time']): ?>
+                                                                    เวลา <?php echo $slip['transfer_time']; ?>
+                                                                <?php endif; ?>
+                                                            </div>
+                                                            <?php if ($slip['bank_from']): ?>
+                                                                <div class="mb-2">
+                                                                    <strong>ธนาคารต้นทาง:</strong> <?php echo $slip['bank_from']; ?>
+                                                                </div>
+                                                            <?php endif; ?>
+                                                            <?php if ($slip['ref_number']): ?>
+                                                                <div class="mb-2">
+                                                                    <strong>หมายเลขอ้างอิง:</strong> <code><?php echo $slip['ref_number']; ?></code>
+                                                                </div>
+                                                            <?php endif; ?>
+                                                            <?php if ($slip['notes']): ?>
+                                                                <div class="mb-2">
+                                                                    <strong>หมายเหตุ:</strong> <?php echo htmlspecialchars($slip['notes']); ?>
+                                                                </div>
+                                                            <?php endif; ?>
+                                                        </div>
+                                                        <div class="col-md-4 text-center">
+                                                            <img src="../uploads/slips/<?php echo $slip['slip_image']; ?>" 
+                                                                 class="slip-large border rounded" 
+                                                                 onclick="showSlipModal('<?php echo $slip['slip_image']; ?>', '<?php echo $slip['student_code']; ?>')"
+                                                                 alt="สลิป" style="cursor: pointer;">
+                                                        </div>
+                                                    </div>
+                                                    
+                                                    <div class="row mt-3">
+                                                        <div class="col-md-6">
+                                                            <form method="POST" style="display: inline;" onsubmit="return confirm('ต้องการอนุมัติสลิปนี้?')">
+                                                                <input type="hidden" name="slip_id" value="<?php echo $slip['slip_id']; ?>">
+                                                                <button type="submit" name="approve_slip" class="btn btn-success btn-sm w-100">
+                                                                    <i class="fas fa-check"></i> อนุมัติ
+                                                                </button>
+                                                            </form>
+                                                        </div>
+                                                        <div class="col-md-6">
+                                                            <button type="button" class="btn btn-danger btn-sm w-100" 
+                                                                    onclick="showRejectModal(<?php echo $slip['slip_id']; ?>, '<?php echo $slip['student_code']; ?>')">
+                                                                <i class="fas fa-times"></i> ปฏิเสธ
+                                                            </button>
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        </div>
                                     <?php endforeach; ?>
-                                </select>
-                            </div>
-                            <div class="col-md-2">
-                                <label class="form-label">วันที่เริ่มต้น</label>
-                                <input type="date" class="form-control" name="date_from" value="<?php echo $date_from; ?>">
-                            </div>
-                            <div class="col-md-2">
-                                <label class="form-label">วันที่สิ้นสุด</label>
-                                <input type="date" class="form-control" name="date_to" value="<?php echo $date_to; ?>">
-                            </div>
-                            <div class="col-md-2 d-flex align-items-end">
-                                <button type="submit" class="btn btn-primary me-2">
-                                    <i class="fas fa-search"></i> ค้นหา
-                                </button>
-                                <a href="payments.php" class="btn btn-secondary me-2">
-                                    <i class="fas fa-refresh"></i> ล้าง
-                                </a>
-                                <button type="button" class="btn btn-success" onclick="exportToExcel()">
-                                    <i class="fas fa-file-excel"></i>
-                                </button>
-                            </div>
-                        </form>
-                    </div>
-                </div>
-                
-                <!-- รายการการจ่ายเงิน -->
-                <div class="card">
-                    <div class="card-header d-flex justify-content-between align-items-center">
-                        <h5><i class="fas fa-list"></i> รายการการจ่ายเงิน (<?php echo count($payments); ?> รายการ)</h5>
-                        <div>
-                            <span class="text-muted">ยอดรวมในหน้านี้: </span>
-                            <strong class="text-primary">
-                                <?php 
-                                $page_total = array_sum(array_column($payments, 'amount'));
-                                echo number_format($page_total, 2); 
-                                ?> บาท
-                            </strong>
+                                </div>
+                            <?php else: ?>
+                                <div class="text-center py-5">
+                                    <i class="fas fa-check-circle fa-5x text-success mb-3"></i>
+                                    <h4 class="text-muted">ไม่มีสลิปรออนุมัติ</h4>
+                                    <p class="text-muted">สลิปทั้งหมดได้รับการตรวจสอบแล้ว</p>
+                                </div>
+                            <?php endif; ?>
                         </div>
-                    </div>
-                    <div class="card-body p-0">
-                        <div class="table-responsive">
-                            <table class="table table-hover mb-0" id="paymentsTable">
-                                <thead class="table-dark">
-                                    <tr>
-                                        <th>วันที่จ่าย</th>
-                                        <th>รหัสนักเรียน</th>
-                                        <th>ชื่อ-นามสกุล</th>
-                                        <th>ชั้นเรียน</th>
-                                        <th>สี</th>
-                                        <th>จำนวนเงิน</th>
-                                        <th>วิธีการจ่าย</th>
-                                        <th>เลขใบเสร็จ/อ้างอิง</th>
-                                        <th>สลิป</th>
-                                        <th>ผู้บันทึก</th>
-                                        <th>หมายเหตุ</th>
-                                        <th width="100">จัดการ</th>
-                                    </tr>
-                                </thead>
-                                <tbody>
-                                    <?php foreach ($payments as $payment): ?>
-                                        <tr>
-                                            <td>
-                                                <strong><?php echo date('d/m/Y', strtotime($payment['payment_date'])); ?></strong>
-                                                <br>
-                                                <small class="text-muted"><?php echo date('H:i', strtotime($payment['created_at'])); ?></small>
-                                            </td>
-                                            <td><strong><?php echo $payment['student_code']; ?></strong></td>
-                                            <td><?php echo $payment['title'] . $payment['first_name'] . ' ' . $payment['last_name']; ?></td>
-                                            <td>
-                                                <small><?php echo $payment['level'] . ' ' . $payment['department_name'] . ' ' . $payment['group_number']; ?></small>
-                                            </td>
-                                            <td>
-                                                <?php if ($payment['color_name']): ?>
-                                                    <span class="color-badge" style="background-color: <?php echo $payment['color_code']; ?>"></span>
-                                                    <?php echo $payment['color_name']; ?>
-                                                    <?php if ($payment['amount'] == $payment['fee_amount']): ?>
-                                                        <br><span class="badge bg-success payment-source-badge">ถูกต้อง</span>
-                                                    <?php else: ?>
-                                                        <br><span class="badge bg-warning payment-source-badge">ไม่ตรง</span>
-                                                    <?php endif; ?>
-                                                <?php else: ?>
-                                                    <span class="text-muted">-</span>
+                        
+                        <!-- รายการการจ่ายเงิน -->
+                        <div class="tab-pane fade" id="payment-records" role="tabpanel">
+                            <!-- ฟิลเตอร์ -->
+                            <div class="card mb-4">
+                                <div class="card-body">
+                                    <form method="GET" class="row g-3">
+                                        <input type="hidden" name="tab" value="payment-records">
+                                        <div class="col-md-2">
+                                            <label class="form-label">ค้นหา</label>
+                                            <input type="text" class="form-control" name="search" 
+                                                   placeholder="รหัส/ชื่อ/เลขใบเสร็จ" value="<?php echo htmlspecialchars($search); ?>">
+                                        </div>
+                                        <div class="col-md-2">
+                                            <label class="form-label">วิธีการจ่าย</label>
+                                            <select class="form-select" name="payment_method_filter">
+                                                <option value="">ทั้งหมด</option>
+                                                <option value="เงินสด" <?php echo $payment_method_filter === 'เงินสด' ? 'selected' : ''; ?>>เงินสด</option>
+                                                <option value="โอนเงิน" <?php echo $payment_method_filter === 'โอนเงิน' ? 'selected' : ''; ?>>โอนเงิน</option>
+                                            </select>
+                                        </div>
+                                        <div class="col-md-2">
+                                            <label class="form-label">สี</label>
+                                            <select class="form-select" name="color_filter">
+                                                <option value="">ทุกสี</option>
+                                                <?php foreach ($colors as $color): ?>
+                                                    <option value="<?php echo $color['color_id']; ?>" 
+                                                            <?php echo $color_filter == $color['color_id'] ? 'selected' : ''; ?>>
+                                                        <?php echo $color['color_name']; ?>
+                                                    </option>
+                                                <?php endforeach; ?>
+                                            </select>
+                                        </div>
+                                        <div class="col-md-2">
+                                            <label class="form-label">วันที่เริ่มต้น</label>
+                                            <input type="date" class="form-control" name="date_from" value="<?php echo $date_from; ?>">
+                                        </div>
+                                        <div class="col-md-2">
+                                            <label class="form-label">วันที่สิ้นสุด</label>
+                                            <input type="date" class="form-control" name="date_to" value="<?php echo $date_to; ?>">
+                                        </div>
+                                        <div class="col-md-2 d-flex align-items-end">
+                                            <button type="submit" class="btn btn-primary me-2">
+                                                <i class="fas fa-search"></i> ค้นหา
+                                            </button>
+                                            <a href="payments.php" class="btn btn-secondary me-2">
+                                                <i class="fas fa-refresh"></i> ล้าง
+                                            </a>
+                                            <button type="button" class="btn btn-success" onclick="exportToExcel()">
+                                                <i class="fas fa-file-excel"></i>
+                                            </button>
+                                        </div>
+                                    </form>
+                                </div>
+                            </div>
+                            
+                            <!-- รายการการจ่ายเงิน -->
+                            <div class="card">
+                                <div class="card-header d-flex justify-content-between align-items-center">
+                                    <h5><i class="fas fa-list"></i> รายการการจ่ายเงิน (<?php echo count($payments); ?> รายการ)</h5>
+                                    <div class="d-flex align-items-center">
+                                        <span class="text-muted me-3">ยอดรวมในหน้านี้: </span>
+                                        <strong class="text-primary me-3">
+                                            <?php 
+                                            $page_total = array_sum(array_column($payments, 'amount'));
+                                            echo number_format($page_total, 2); 
+                                            ?> บาท
+                                        </strong>
+                                        <div class="btn-group">
+                                            <button type="button" class="btn btn-sm btn-success dropdown-toggle" data-bs-toggle="dropdown">
+                                                <i class="fas fa-print"></i> พิมพ์/ส่งออก
+                                            </button>
+                                            <ul class="dropdown-menu">
+                                                <li><h6 class="dropdown-header">เมนูพิมพ์และส่งออก</h6></li>
+                                                <li><a class="dropdown-item" href="#" onclick="printAllReceipts()">
+                                                    <i class="fas fa-print me-2"></i>เปิดใบเสร็จทั้งหมด
+                                                </a></li>
+                                                <li><a class="dropdown-item" href="#" onclick="exportToExcel()">
+                                                    <i class="fas fa-file-excel me-2"></i>ส่งออก Excel
+                                                </a></li>
+                                                <li><hr class="dropdown-divider"></li>
+                                                <li><a class="dropdown-item" href="#" onclick="window.print()">
+                                                    <i class="fas fa-print me-2"></i>พิมพ์หน้านี้
+                                                </a></li>
+                                            </ul>
+                                        </div>
+                                    </div>
+                                </div>
+                                <div class="card-body p-0">
+                                    <div class="table-responsive">
+                                        <table class="table table-hover mb-0" id="paymentsTable">
+                                            <thead class="table-dark">
+                                                <tr>
+                                                    <th>วันที่จ่าย</th>
+                                                    <th>รหัสนักเรียน</th>
+                                                    <th>ชื่อ-นามสกุล</th>
+                                                    <th>ชั้นเรียน</th>
+                                                    <th>สี</th>
+                                                    <th>จำนวนเงิน</th>
+                                                    <th>วิธีการจ่าย</th>
+                                                    <th>เลขใบเสร็จ/อ้างอิง</th>
+                                                    <th>สลิป</th>
+                                                    <th>ผู้บันทึก</th>
+                                                    <th>หมายเหตุ</th>
+                                                    <th width="100">จัดการ</th>
+                                                </tr>
+                                            </thead>
+                                            <tbody>
+                                                <?php foreach ($payments as $payment): ?>
+                                                    <tr>
+                                                        <td>
+                                                            <strong><?php echo date('d/m/Y', strtotime($payment['payment_date'])); ?></strong>
+                                                            <br>
+                                                            <small class="text-muted"><?php echo date('H:i', strtotime($payment['created_at'])); ?></small>
+                                                        </td>
+                                                        <td><strong><?php echo $payment['student_code']; ?></strong></td>
+                                                        <td><?php echo $payment['title'] . $payment['first_name'] . ' ' . $payment['last_name']; ?></td>
+                                                        <td>
+                                                            <small><?php echo $payment['level'] . ' ' . $payment['department_name'] . ' ' . $payment['group_number']; ?></small>
+                                                        </td>
+                                                        <td>
+                                                            <?php if ($payment['color_name']): ?>
+                                                                <span class="color-badge" style="background-color: <?php echo $payment['color_code']; ?>"></span>
+                                                                <?php echo $payment['color_name']; ?>
+                                                                <?php if ($payment['amount'] == $payment['fee_amount']): ?>
+                                                                    <br><span class="badge bg-success payment-source-badge">ถูกต้อง</span>
+                                                                <?php else: ?>
+                                                                    <br><span class="badge bg-warning payment-source-badge">ไม่ตรง</span>
+                                                                <?php endif; ?>
+                                                            <?php else: ?>
+                                                                <span class="text-muted">-</span>
+                                                            <?php endif; ?>
+                                                        </td>
+                                                        <td>
+                                                            <strong class="text-success"><?php echo number_format($payment['amount'], 2); ?> บาท</strong>
+                                                            <?php if ($payment['color_name'] && $payment['amount'] != $payment['fee_amount']): ?>
+                                                                <br><small class="text-muted">ควรเป็น <?php echo number_format($payment['fee_amount'], 2); ?></small>
+                                                            <?php endif; ?>
+                                                        </td>
+                                                        <td>
+                                                            <span class="badge <?php 
+                                                                echo $payment['payment_method'] === 'เงินสด' ? 'bg-success' : 'bg-info'; 
+                                                            ?>">
+                                                                <i class="fas fa-<?php echo $payment['payment_method'] === 'เงินสด' ? 'hand-holding-usd' : 'mobile-alt'; ?>"></i>
+                                                                <?php echo $payment['payment_method']; ?>
+                                                            </span>
+                                                            <?php if ($payment['slip_id']): ?>
+                                                                <br><span class="badge bg-primary payment-source-badge">จากสลิป</span>
+                                                            <?php endif; ?>
+                                                        </td>
+                                                        <td>
+                                                            <?php if ($payment['receipt_number']): ?>
+                                                                <code><?php echo $payment['receipt_number']; ?></code>
+                                                            <?php else: ?>
+                                                                <span class="text-muted">-</span>
+                                                            <?php endif; ?>
+                                                        </td>
+                                                        <td>
+                                                            <?php if ($payment['slip_image']): ?>
+                                                                <img src="../uploads/slips/<?php echo $payment['slip_image']; ?>" 
+                                                                     class="slip-thumbnail" 
+                                                                     onclick="showSlipModal('<?php echo $payment['slip_image']; ?>', '<?php echo $payment['student_code']; ?>')"
+                                                                     alt="สลิป" title="คลิกดูสลิป">
+                                                            <?php else: ?>
+                                                                <span class="text-muted">-</span>
+                                                            <?php endif; ?>
+                                                        </td>
+                                                        <td>
+                                                            <small><?php echo $payment['recorded_by_name']; ?></small>
+                                                        </td>
+                                                        <td>
+                                                            <small><?php echo $payment['notes'] ? htmlspecialchars($payment['notes']) : '-'; ?></small>
+                                                        </td>
+                                                        <td>
+                                                            <?php if (!$payment['slip_id']): // ถ้าไม่ใช่จากสลิป สามารถลบได้ ?>
+                                                                <a href="?delete=<?php echo $payment['payment_id']; ?>" 
+                                                                   class="btn btn-sm btn-outline-danger"
+                                                                   onclick="return confirm('ต้องการลบรายการนี้?')"
+                                                                   title="ลบ">
+                                                                    <i class="fas fa-trash"></i>
+                                                                </a>
+                                                            <?php else: ?>
+                                                                <span class="text-muted">-</span>
+                                                            <?php endif; ?>
+                                                        </td>
+                                                    </tr>
+                                                <?php endforeach; ?>
+                                                
+                                                <?php if (empty($payments)): ?>
+                                                    <tr>
+                                                        <td colspan="12" class="text-center py-4">
+                                                            <i class="fas fa-money-bill fa-3x text-muted"></i>
+                                                            <p class="mt-2 text-muted">ยังไม่มีข้อมูลการจ่ายเงิน</p>
+                                                        </td>
+                                                    </tr>
                                                 <?php endif; ?>
-                                            </td>
-                                            <td>
-                                                <strong class="text-success"><?php echo number_format($payment['amount'], 2); ?> บาท</strong>
-                                                <?php if ($payment['color_name'] && $payment['amount'] != $payment['fee_amount']): ?>
-                                                    <br><small class="text-muted">ควรเป็น <?php echo number_format($payment['fee_amount'], 2); ?></small>
-                                                <?php endif; ?>
-                                            </td>
-                                            <td>
-                                                <span class="badge <?php 
-                                                    echo $payment['payment_method'] === 'เงินสด' ? 'bg-success' : 'bg-info'; 
-                                                ?>">
-                                                    <i class="fas fa-<?php echo $payment['payment_method'] === 'เงินสด' ? 'hand-holding-usd' : 'mobile-alt'; ?>"></i>
-                                                    <?php echo $payment['payment_method']; ?>
-                                                </span>
-                                                <?php if ($payment['slip_id']): ?>
-                                                    <br><span class="badge bg-primary payment-source-badge">จากสลิป</span>
-                                                <?php endif; ?>
-                                            </td>
-                                            <td>
-                                                <?php if ($payment['receipt_number']): ?>
-                                                    <code><?php echo $payment['receipt_number']; ?></code>
-                                                <?php else: ?>
-                                                    <span class="text-muted">-</span>
-                                                <?php endif; ?>
-                                            </td>
-                                            <td>
-                                                <?php if ($payment['slip_image']): ?>
-                                                    <img src="../uploads/payment_slips/<?php echo $payment['slip_image']; ?>" 
-                                                         class="slip-thumbnail" 
-                                                         onclick="showSlipModal('<?php echo $payment['slip_image']; ?>', '<?php echo $payment['student_code']; ?>')"
-                                                         alt="สลิป" title="คลิกดูสลิป">
-                                                <?php else: ?>
-                                                    <span class="text-muted">-</span>
-                                                <?php endif; ?>
-                                            </td>
-                                            <td>
-                                                <small><?php echo $payment['recorded_by_name']; ?></small>
-                                            </td>
-                                            <td>
-                                                <small><?php echo $payment['notes'] ? htmlspecialchars($payment['notes']) : '-'; ?></small>
-                                            </td>
-                                            <td>
-                                                <?php if (!$payment['slip_id']): // ถ้าไม่ใช่จากสลิป สามารถลบได้ ?>
-                                                    <a href="?delete=<?php echo $payment['payment_id']; ?>" 
-                                                       class="btn btn-sm btn-outline-danger"
-                                                       onclick="return confirm('ต้องการลบรายการนี้?')"
-                                                       title="ลบ">
-                                                        <i class="fas fa-trash"></i>
-                                                    </a>
-                                                <?php else: ?>
-                                                    <a href="verify_slips.php?search=<?php echo $payment['student_code']; ?>" 
-                                                       class="btn btn-sm btn-outline-info"
-                                                       title="ดูสลิป">
-                                                        <i class="fas fa-eye"></i>
-                                                    </a>
-                                                <?php endif; ?>
-                                            </td>
-                                        </tr>
-                                    <?php endforeach; ?>
-                                    
-                                    <?php if (empty($payments)): ?>
-                                        <tr>
-                                            <td colspan="12" class="text-center py-4">
-                                                <i class="fas fa-money-bill fa-3x text-muted"></i>
-                                                <p class="mt-2 text-muted">ยังไม่มีข้อมูลการจ่ายเงิน</p>
-                                            </td>
-                                        </tr>
-                                    <?php endif; ?>
-                                </tbody>
-                            </table>
+                                            </tbody>
+                                        </table>
+                                    </div>
+                                </div>
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -646,6 +919,45 @@ $students_with_colors = $stmt->fetchAll();
                             <i class="fas fa-save"></i> บันทึกการจ่ายเงินสด
                         </button>
                     </div>
+                    
+                    <!-- หมายเหตุสำหรับการพิมพ์ใบเสร็จ -->
+                    <div class="alert alert-info mx-3 mb-3">
+                        <i class="fas fa-info-circle"></i>
+                        <strong>การพิมพ์ใบเสร็จ:</strong> หลังบันทึกเรียบร้อยแล้ว ไปที่แท็บ "รายการการจ่ายเงิน" แล้วคลิกปุ่ม <span class="badge bg-success">🖨️</span> เพื่อพิมพ์ใบเสร็จ
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Reject Slip Modal -->
+    <div class="modal fade" id="rejectSlipModal" tabindex="-1">
+        <div class="modal-dialog">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title"><i class="fas fa-times"></i> ปฏิเสธสลิป</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <form method="POST" id="rejectForm">
+                    <div class="modal-body">
+                        <input type="hidden" name="slip_id" id="rejectSlipId">
+                        <div class="alert alert-warning">
+                            <i class="fas fa-exclamation-triangle"></i>
+                            <strong>หมายเหตุ:</strong> กรุณาระบุเหตุผลในการปฏิเสธสลิปนี้
+                        </div>
+                        <div class="mb-3">
+                            <label class="form-label">เหตุผลในการปฏิเสธ <span class="text-danger">*</span></label>
+                            <textarea class="form-control" name="reject_reason" rows="4" 
+                                      placeholder="เช่น ภาพไม่ชัด, จำนวนเงินไม่ตรง, หมายเลขอ้างอิงผิด" required></textarea>
+                        </div>
+                        <div id="rejectStudentInfo"></div>
+                    </div>
+                    <div class="modal-footer">
+                        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">ยกเลิก</button>
+                        <button type="submit" name="reject_slip" class="btn btn-danger">
+                            <i class="fas fa-times"></i> ปฏิเสธสลิป
+                        </button>
+                    </div>
                 </form>
             </div>
         </div>
@@ -670,6 +982,31 @@ $students_with_colors = $stmt->fetchAll();
     <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/select2@4.1.0-rc.0/dist/js/select2.min.js"></script>
     <script>
+        // ตรวจสอบ URL parameter สำหรับแสดง tab ที่ถูกต้อง
+        document.addEventListener('DOMContentLoaded', function() {
+            const urlParams = new URLSearchParams(window.location.search);
+            const activeTab = urlParams.get('tab');
+            
+            if (activeTab === 'payment-records') {
+                // เปลี่ยนไปแสดง tab รายการการจ่ายเงิน
+                document.getElementById('pending-slips-tab').classList.remove('active');
+                document.getElementById('payment-records-tab').classList.add('active');
+                document.getElementById('pending-slips').classList.remove('show', 'active');
+                document.getElementById('payment-records').classList.add('show', 'active');
+            }
+        });
+        
+        // แสดง modal ปฏิเสธสลิป
+        function showRejectModal(slipId, studentCode) {
+            document.getElementById('rejectSlipId').value = slipId;
+            document.getElementById('rejectStudentInfo').innerHTML = `
+                <div class="alert alert-info">
+                    <strong>รหัสนักเรียน:</strong> ${studentCode}
+                </div>
+            `;
+            new bootstrap.Modal(document.getElementById('rejectSlipModal')).show();
+        }
+        
         // อัปเดตข้อมูลนักเรียน
         function updateStudentInfo() {
             const studentSelect = document.getElementById('studentSelect');
@@ -777,7 +1114,7 @@ $students_with_colors = $stmt->fetchAll();
         
         // แสดงภาพสลิป
         function showSlipModal(imageName, studentCode) {
-            document.getElementById('modalSlipImage').src = '../uploads/payment_slips/' + imageName;
+            document.getElementById('modalSlipImage').src = '../uploads/slips/' + imageName;
             document.querySelector('#slipImageModal .modal-title').textContent = 'สลิปการโอนเงิน - ' + studentCode;
             new bootstrap.Modal(document.getElementById('slipImageModal')).show();
         }
@@ -825,8 +1162,67 @@ $students_with_colors = $stmt->fetchAll();
             }
         }
         
+        // พิมพ์ใบเสร็จทั้งหมด
+        function printAllReceipts() {
+            const receiptLinks = document.querySelectorAll('a[href*="print_receipt.php"]');
+            
+            if (receiptLinks.length === 0) {
+                alert('ไม่มีรายการการจ่ายเงินให้พิมพ์');
+                return;
+            }
+            
+            if (confirm('ต้องการเปิดใบเสร็จทั้งหมด ' + receiptLinks.length + ' ใบ?\n\nจะเปิดหน้าต่างใหม่สำหรับแต่ละใบเสร็จ')) {
+                let printedCount = 0;
+                
+                receiptLinks.forEach((link, index) => {
+                    setTimeout(() => {
+                        window.open(link.href, '_blank');
+                        printedCount++;
+                        
+                        if (printedCount === receiptLinks.length) {
+                            setTimeout(() => {
+                                alert('เปิดใบเสร็จทั้งหมดแล้ว ' + printedCount + ' ใบ\nกรุณาพิมพ์จากแต่ละหน้าต่าง');
+                            }, 1000);
+                        }
+                    }, index * 500); // หน่วงเวลาเพื่อไม่ให้เปิดพร้อมกันทุกหน้า
+                });
+            }
+        }
+        
+        // พิมพ์ใบเสร็จทั้งหมด
+        function printAllReceipts() {
+            const receiptLinks = document.querySelectorAll('a[href*="print_receipt.php"]');
+            
+            if (receiptLinks.length === 0) {
+                alert('ไม่มีรายการการจ่ายเงินให้พิมพ์');
+                return;
+            }
+            
+            if (confirm('ต้องการเปิดใบเสร็จทั้งหมด ' + receiptLinks.length + ' ใบ?\n\nจะเปิดหน้าต่างใหม่สำหรับแต่ละใบเสร็จ')) {
+                let printedCount = 0;
+                
+                receiptLinks.forEach((link, index) => {
+                    setTimeout(() => {
+                        window.open(link.href, '_blank');
+                        printedCount++;
+                        
+                        if (printedCount === receiptLinks.length) {
+                            setTimeout(() => {
+                                alert('เปิดใบเสร็จทั้งหมดแล้ว ' + printedCount + ' ใบ\nกรุณาพิมพ์จากแต่ละหน้าต่าง');
+                            }, 1000);
+                        }
+                    }, index * 500); // หน่วงเวลาเพื่อไม่ให้เปิดพร้อมกันทุกหน้า
+                });
+            }
+        }
+        
         // Event Listeners
         document.addEventListener('DOMContentLoaded', function() {
+            // เปิดใช้งาน Tooltip
+            var tooltipTriggerList = [].slice.call(document.querySelectorAll('[data-bs-toggle="tooltip"]'));
+            var tooltipList = tooltipTriggerList.map(function (tooltipTriggerEl) {
+                return new bootstrap.Tooltip(tooltipTriggerEl);
+            });
             // Initialize Select2
             $('#studentSelect').select2({
                 theme: 'bootstrap-5',
@@ -906,6 +1302,11 @@ $students_with_colors = $stmt->fetchAll();
                 document.getElementById('colorInfo').classList.add('d-none');
                 document.getElementById('feeInfo').innerHTML = '';
                 document.getElementById('paymentSummary').classList.add('d-none');
+            });
+            
+            // รีเซ็ตฟอร์มปฏิเสธเมื่อปิดโมดอล
+            document.getElementById('rejectSlipModal').addEventListener('hidden.bs.modal', function() {
+                document.getElementById('rejectForm').reset();
             });
             
             // ตั้งค่าวันที่เป็นวันปัจจุบัน
